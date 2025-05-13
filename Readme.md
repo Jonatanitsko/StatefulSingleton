@@ -1,8 +1,24 @@
-# Overview
-The StatefulSingleton operator ensures zero downtime for critical stateful applications that cannot run in parallel by controlling pod transitions during rollouts, node drains, or pod deletions. It works with Kubernetes Deployment object without requiring modifications to the applications themselves.
+# StatefulSingleton Operator
 
-# Architecture and Components
+A Kubernetes operator for managing stateful singleton applications with controlled transitions and zero parallel execution.
+
+## Overview
+
+The StatefulSingleton operator ensures zero downtime for critical stateful applications that cannot run in parallel by controlling pod transitions during rollouts, node drains, or pod deletions. It works with standard Kubernetes Deployments without requiring modifications to the applications themselves.
+
+## Key Features
+
+- **Zero Parallel Execution**: Guarantees that no two instances of a singleton application can run in parallel
+- **Graceful Termination**: Respects configurable termination grace periods for clean shutdowns
+- **Minimal Downtime**: Optimizes transition process to minimize gaps between instances
+- **Standard Integration**: Works with standard Kubernetes Deployments and StatefulSets
+- **No Application Changes**: Operates without requiring modifications to application code
+
+## Architecture and Components
+
 The StatefulSingleton operator architecture consists of several key components working together to ensure controlled transitions between pods:
+
+```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       OpenShift Cluster                              │
 │                                                                      │
@@ -50,204 +66,72 @@ The StatefulSingleton operator architecture consists of several key components w
 │  └───────────────────────────────────────────────┘                  │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
-Transition Flow
-The diagram above illustrates the architecture of the StatefulSingleton operator. Here's how the components work together during a transition:
+```
 
-The StatefulSingleton Controller continuously watches both the StatefulSingleton CR and pods that match the selector
-When a new pod is created (by Deployment controller, StatefulSet controller, etc.):
+### Components
 
-The Mutating Webhook intercepts the pod creation request
-It adds the wrapper script, readiness gate, and sidecar container
-The pod is created with these modifications
+1. **StatefulSingleton Custom Resource**: Defines the parameters for controlling transitions
+2. **Mutating Webhook**: Intercepts pod creation to inject process control mechanisms
+3. **Controller**: Manages the transition process between old and new pods
+4. **ConfigMap**: Contains the wrapper script used to control application startup
+5. **Sidecar Container**: Facilitates communication between the operator and application containers
 
+## Transition Flow and Operator Logic
 
-The StatefulSingleton Controller detects the new pod and:
+The StatefulSingleton operator follows a strict process to ensure zero parallel execution:
 
-Keeps the new pod's readiness gate in a "not ready" state
-Monitors the old pod for termination
-When the old pod begins terminating, it creates the signal file in the new pod
-The main application in the new pod then starts
+1. **Initialization**:
+   - User creates a Deployment/StatefulSet and a StatefulSingleton resource
+   - Initial pod is created and allowed to start normally
 
+2. **New Pod Creation**:
+   - When a new pod is created (rollout, node drain, etc.), the webhook intercepts it
+   - The webhook injects a wrapper script that blocks the main application process
+   - The pod starts but its main process remains blocked
 
-The transition is complete when the old pod terminates and the new pod is running
+3. **Transition Management**:
+   - The controller detects the new pod and keeps it in a non-ready state
+   - The controller monitors the old pod for termination
+   - When the old pod begins terminating, the controller respects its grace period
 
-This flow ensures that there's never a moment when both pods are running their main processes simultaneously, while still allowing for rapid pod creation and volume mounting.
-Components Detailed
-1. Custom Resource Definition (CRD)
-The StatefulSingleton CRD defines the parameters for controlling pod transitions:
-yamlapiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: statefulsingleton.apps.openshift.yourdomain.com
-spec:
-  group: apps.openshift.yourdomain.com
-  names:
-    kind: StatefulSingleton
-    listKind: StatefulSingletonList
-    plural: statefulsingleton
-    singular: statefulsingleton
-    shortNames:
-    - stfs
-  scope: Namespaced
-  versions:
-  - name: v1
-    served: true
-    storage: true
-    schema:
-      openAPIV3Schema:
-        type: object
-        properties:
-          spec:
-            type: object
-            required:
-            - selector
-            properties:
-              selector:
-                type: object
-                properties:
-                  matchLabels:
-                    type: object
-                    additionalProperties:
-                      type: string
-              maxTransitionTime:
-                type: integer
-                description: "Maximum time in seconds to wait for a transition"
-                default: 300
-              terminationGracePeriod:
-                type: integer
-                description: "Time in seconds to wait for the pod to terminate"
-                default: 30
-          status:
-            type: object
-            properties:
-              activePod:
-                type: string
-              phase:
-                type: string
-                enum: ["Running", "Transitioning", "Failed"]
-              transitionTimestamp:
-                type: string
-                format: date-time
-              message:
-                type: string
-    additionalPrinterColumns:
-    - name: Status
-      type: string
-      jsonPath: .status.phase
-    - name: Active Pod
-      type: string
-      jsonPath: .status.activePod
-    - name: Age
-      type: date
-      jsonPath: .metadata.creationTimestamp
-    subresources:
-      status: {}
-2. Mutating Webhook
-The webhook intercepts pod creation requests and modifies them to include our custom components:
-yamlapiVersion: admissionregistration.k8s.io/v1
-kind: MutatingWebhookConfiguration
-metadata:
-  name: statefulsingleton-mutating-webhook-configuration
-webhooks:
-- name: pod-mutation.openshift.yourdomain.com
-  admissionReviewVersions: ["v1", "v1beta1"]
-  clientConfig:
-    service:
-      name: statefulsingleton-webhook-service
-      namespace: statefulsingleton-operator-system
-      path: "/mutate-v1-pod"
-  rules:
-  - apiGroups: [""]
-    apiVersions: ["v1"]
-    operations: ["CREATE"]
-    resources: ["pods"]
-    scope: "Namespaced"
-  sideEffects: None
-  timeoutSeconds: 5
-  failurePolicy: Ignore
-3. Controller Manager
-The controller manager reconciles StatefulSingleton resources and manages pod transitions:
-yamlapiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: statefulsingleton-controller-manager
-  namespace: statefulsingleton-operator-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: statefulsingleton-controller-manager
-  template:
-    metadata:
-      labels:
-        app: statefulsingleton-controller-manager
-    spec:
-      containers:
-      - name: manager
-        image: quay.io/yourdomain/statefulsingleton-operator:v0.1.0
-        args:
-        - "--leader-elect"
-        - "--metrics-bind-address=:8080"
-        - "--health-probe-bind-address=:8081"
-        resources:
-          limits:
-            cpu: 500m
-            memory: 256Mi
-          requests:
-            cpu: 100m
-            memory: 128Mi
-      serviceAccountName: statefulsingleton-controller-manager
-4. ConfigMap for Wrapper Script
-The wrapper script that's injected into containers:
-yamlapiVersion: v1
-kind: ConfigMap
-metadata:
-  name: statefulsingleton-wrapper
-  namespace: my-project
-data:
-  entrypoint-wrapper.sh: |
-    #!/bin/sh
-    set -e
+4. **Handover**:
+   - After the old pod is completely terminated, the controller signals the new pod
+   - The new pod's wrapper script detects the signal and starts the main application
+   - The controller updates the pod's readiness condition to allow traffic
 
-    echo "StatefulSingleton: Container starting, waiting for signal before executing application..."
+5. **Completion**:
+   - The new pod becomes the active instance
+   - The StatefulSingleton resource status is updated to reflect the new active pod
 
-    # Extract original entrypoint from env variable
-    if [ -n "$ORIGINAL_ENTRYPOINT" ]; then
-      ENTRYPOINT_JSON="$ORIGINAL_ENTRYPOINT"
-    else
-      # Default empty entrypoint
-      ENTRYPOINT_JSON='{"command":[],"args":[]}'
-    fi
+This flow ensures there is never a moment when both pods are running their main processes simultaneously, making it perfect for stateful applications that cannot operate in parallel.
 
-    # Parse JSON to extract command and args
-    COMMAND=$(echo "$ENTRYPOINT_JSON" | grep -o '"command":\[[^]]*\]' | sed 's/"command":\[//;s/\]//' | tr -d '"' | tr ',' ' ')
-    ARGS=$(echo "$ENTRYPOINT_JSON" | grep -o '"args":\[[^]]*\]' | sed 's/"args":\[//;s/\]//' | tr -d '"' | tr ',' ' ')
+## Getting Started
 
-    # Wait for signal file
-    while [ ! -f /var/run/signal/start-signal ]; do
-      sleep 1
-    done
+### Prerequisites
 
-    echo "StatefulSingleton: Start signal received, executing application: $COMMAND $ARGS"
+- OpenShift 4.12+ or Kubernetes 1.22+
+- kubectl/oc CLI tools
+- Storage class with ReadWriteMany capability
 
-    # If command is empty, run the args directly
-    if [ -z "$COMMAND" ]; then
-      if [ -z "$ARGS" ]; then
-        # No command or args, try to find the image's entrypoint
-        echo "StatefulSingleton: No command or args specified, running default entrypoint"
-        exec /bin/sh
-      else
-        # Run args as a command
-        exec $ARGS
-      fi
-    else
-      # Run command with args
-      exec $COMMAND $ARGS
-    fi
-Sample Implementation Files
-Let's provide some additional sample files for reference:
-Sample StatefulSingleton Resource
-yamlapiVersion: apps.openshift.yourdomain.com/v1
+### Installation
+
+```bash
+# Install CRDs
+kubectl apply -f config/crd/bases/apps.openshift.yourdomain.com_statefulsingleton.yaml
+
+# Install RBAC
+kubectl apply -f config/rbac/
+
+# Deploy the operator
+kubectl apply -f config/manager/manager.yaml
+```
+
+### Usage
+
+1. Create a StatefulSingleton resource:
+
+```yaml
+apiVersion: apps.openshift.yourdomain.com/v1
 kind: StatefulSingleton
 metadata:
   name: my-database
@@ -257,10 +141,14 @@ spec:
     matchLabels:
       app: postgres-database
       tier: database
-  maxTransitionTime: 600  # 10 minutes
   terminationGracePeriod: 120  # 2 minutes
-Sample Deployment for a Stateful Application
-yamlapiVersion: apps/v1
+  maxTransitionTime: 300       # 5 minutes
+```
+
+2. Create a standard Deployment with matching labels:
+
+```yaml
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres-database
@@ -271,8 +159,6 @@ spec:
     matchLabels:
       app: postgres-database
       tier: database
-  strategy:
-    type: Recreate  # Important for stateful applications
   template:
     metadata:
       labels:
@@ -282,77 +168,76 @@ spec:
       containers:
       - name: postgres
         image: postgres:14
-        ports:
-        - containerPort: 5432
-        env:
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secrets
-              key: password
-        - name: PGDATA
-          value: /var/lib/postgresql/data/pgdata
-        volumeMounts:
-        - name: postgres-data
-          mountPath: /var/lib/postgresql/data
-      volumes:
-      - name: postgres-data
-        persistentVolumeClaim:
-          claimName: postgres-data
-Sample PVC with ReadWriteMany
-yamlapiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data
-  namespace: production
-spec:
-  accessModes:
-  - ReadWriteMany
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: nfs-standard
-Command Reference
-Here's a quick reference for common commands used with the StatefulSingleton operator:
-Installation and Setup
-bash# Install the CRDs
-oc apply -f config/crd/bases/apps.openshift.yourdomain.com_statefulsingleton.yaml
+        # ... regular container configuration
+```
 
-# Deploy the operator
-oc apply -f config/manager/manager.yaml
+3. The operator will now manage transitions between pods to ensure zero parallel execution.
 
-# Verify operator is running
-oc get pods -n statefulsingleton-operator-system
-Creating and Managing Resources
-bash# Create a StatefulSingleton resource
-oc apply -f samples/statefulsingleton.yaml
+## Configuration Options
 
-# Check status
-oc get statefulsingleton
+The StatefulSingleton CRD supports the following configuration options:
 
-# Describe for detailed information
-oc describe statefulsingleton my-database
+| Field | Description | Default |
+|-------|-------------|---------|
+| `spec.selector` | Label selector for pods to manage | Required |
+| `spec.terminationGracePeriod` | Grace period (seconds) for pod termination | 30 |
+| `spec.maxTransitionTime` | Maximum time (seconds) for a transition | 300 |
+| `spec.respectPodGracePeriod` | Whether to use pod's grace period if longer | true |
 
-# Delete a StatefulSingleton (will not delete the underlying deployment)
-oc delete statefulsingleton my-database
-Troubleshooting
-bash# Check operator logs
-oc logs -f deployment/statefulsingleton-controller-manager -n statefulsingleton-operator-system
+## Monitoring and Troubleshooting
 
-# Verify webhook configuration
-oc get mutatingwebhookconfigurations
+### Checking Status
 
-# Check if pod has the readiness gate
-oc get pod postgres-database-abcd1234 -o jsonpath='{.spec.readinessGates}'
+```bash
+# Check StatefulSingleton status
+kubectl get statefulsingleton my-database
 
-# Manually check signal file existence
-oc exec -it postgres-database-abcd1234 -c status-sidecar -- ls -la /var/run/signal/
+# Get detailed status
+kubectl describe statefulsingleton my-database
+```
 
-# Manually create signal file (only for troubleshooting)
-oc exec -it postgres-database-abcd1234 -c status-sidecar -- touch /var/run/signal/start-signal
-With this implementation guide, you should now have a comprehensive understanding of how to build, deploy, and use the StatefulSingleton operator in your OpenShift environment. The operator provides a robust solution for managing stateful singleton applications without requiring application modifications, ensuring zero downtime during transitions while preventing parallel execution. │                  │
-│  │  │ │ Main App   │ │        │ │ Main App   │ │ │                  │
-│  │  │ │ (Running)  │ │        │ │ (Blocked)  │ │ │                  │
-│  │  │ └────────────┘ │        │ └────────────┘ │ │                  │
-│  │  │                │        │                │ │                  │
-│  │  │ ┌────────────┐ │        │ ┌────────────┐ │
+### Checking Logs
+
+```bash
+# View operator logs
+kubectl logs -f deployment/statefulsingleton-controller-manager -c manager
+```
+
+### Common Issues
+
+1. **Stuck Transitions**: If a transition is stuck, check:
+   - Pod termination status: `kubectl get pod <pod-name> -o yaml`
+   - Controller logs for errors
+   - Status of the readiness gate: `kubectl get pod <pod-name> -o jsonpath='{.status.conditions}'`
+
+2. **Signal File Issues**: Check if the signal file exists:
+   ```bash
+   kubectl exec -it <pod-name> -c status-sidecar -- ls -la /var/run/signal/
+   ```
+
+3. **Wrapper Script Issues**: Inspect the wrapper script log:
+   ```bash
+   kubectl logs <pod-name> -c <main-container> | grep StatefulSingleton
+   ```
+
+## Design Considerations
+
+### Why Not Just Use StatefulSets?
+
+While Kubernetes StatefulSets provide ordered deployment, they don't guarantee that only one instance is running at a time. The StatefulSingleton operator ensures zero parallel execution, which is crucial for applications that cannot run concurrent instances.
+
+### Why Use a Mutating Webhook?
+
+The mutating webhook allows us to transparently modify pods at creation time without requiring users to change their deployment manifests. This makes the solution easier to adopt and more maintainable.
+
+### Termination Grace Period Considerations
+
+The operator respects the termination grace period to allow applications to shut down cleanly. This is essential for stateful applications to flush data, close connections, and perform cleanup operations.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the LICENSE file for details.
