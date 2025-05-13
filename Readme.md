@@ -117,7 +117,7 @@ This flow ensures there is never a moment when both pods are running their main 
 
 ```bash
 # Install CRDs
-kubectl apply -f config/crd/bases/apps.openshift.yourdomain.com_statefulsingleton.yaml
+kubectl apply -f config/crd/bases/apps.openshift.statefulsingleton.com_statefulsingleton.yaml
 
 # Install RBAC
 kubectl apply -f config/rbac/
@@ -131,7 +131,7 @@ kubectl apply -f config/manager/manager.yaml
 1. Create a StatefulSingleton resource:
 
 ```yaml
-apiVersion: apps.openshift.yourdomain.com/v1
+apiVersion: apps.openshift.statefulsingleton.com/v1
 kind: StatefulSingleton
 metadata:
   name: my-database
