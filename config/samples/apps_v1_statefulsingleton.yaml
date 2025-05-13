@@ -1,0 +1,12 @@
+apiVersion: apps.statefulsingleton.com/v1
+kind: StatefulSingleton
+metadata:
+  labels:
+    app.kubernetes.io/name: statefulsingleton
+    app.kubernetes.io/instance: statefulsingleton-sample
+    app.kubernetes.io/part-of: stateful-singleton
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: stateful-singleton
+  name: statefulsingleton-sample
+spec:
+  # TODO(user): Add fields here
