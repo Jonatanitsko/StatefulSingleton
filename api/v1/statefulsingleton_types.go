@@ -20,28 +20,54 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // StatefulSingletonSpec defines the desired state of StatefulSingleton
 type StatefulSingletonSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Selector identifies the pods managed by this StatefulSingleton
+	// +required
+	Selector metav1.LabelSelector `json:"selector"`
 
-	// Foo is an example field of StatefulSingleton. Edit statefulsingleton_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// MaxTransitionTime is the maximum time in seconds to wait for a transition
+	// +optional
+	// +kubebuilder:default:=300
+	MaxTransitionTime int `json:"maxTransitionTime,omitempty"`
+
+	// TerminationGracePeriod is the grace period in seconds for pod termination
+	// +optional
+	// +kubebuilder:default:=30
+	TerminationGracePeriod int `json:"terminationGracePeriod,omitempty"`
+
+	// RespectPodGracePeriod determines whether to use the pod's own grace period if it's longer
+	// +optional
+	// +kubebuilder:default:=true
+	RespectPodGracePeriod bool `json:"respectPodGracePeriod,omitempty"`
 }
 
 // StatefulSingletonStatus defines the observed state of StatefulSingleton
 type StatefulSingletonStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// ActivePod is the name of the currently active pod
+	// +optional
+	ActivePod string `json:"activePod,omitempty"`
+
+	// Phase represents the current state of the StatefulSingleton
+	// +optional
+	// +kubebuilder:validation:Enum=Running;Transitioning;Failed
+	Phase string `json:"phase,omitempty"`
+
+	// TransitionTimestamp is when the last transition started
+	// +optional
+	TransitionTimestamp *metav1.Time `json:"transitionTimestamp,omitempty"`
+
+	// Message provides more information about the current phase
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
-
-// StatefulSingleton is the Schema for the statefulsingletons API
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Active Pod",type="string",JSONPath=".status.activePod"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// StatefulSingleton is a resource that manages controlled transitions for stateful singleton applications
 type StatefulSingleton struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -50,9 +76,8 @@ type StatefulSingleton struct {
 	Status StatefulSingletonStatus `json:"status,omitempty"`
 }
 
-//+kubebuilder:object:root=true
-
-// StatefulSingletonList contains a list of StatefulSingleton
+// +kubebuilder:object:root=true
+// StatefulSingletonList contains a list of StatefulSingleton resources
 type StatefulSingletonList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
