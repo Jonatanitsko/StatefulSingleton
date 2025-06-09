@@ -1,8 +1,4 @@
 # VERSION defines the project version for the bundle.
-# Update this value when you upgrade the version of your project.
-# To re-generate a bundle for another specific version without changing the standard setup, you can:
-# - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
-# - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
 VERSION ?= 0.1.0
 
 # CHANNELS define the bundle channels used in the bundle.
@@ -10,7 +6,7 @@ CHANNELS ?= "stable"
 # DEFAULT_CHANNEL defines the default channel used in the bundle.
 DEFAULT_CHANNEL ?= "stable"
 # IMG defines the image for the operator (registry/image:tag).
-IMG ?= quay.io/yourdomain/statefulsingleton-operator:$(VERSION)
+IMG ?= quay.io/jonatanitsko/statefulsingleton-operator:$(VERSION)
 # BUNDLE_IMG defines the image:tag used for the bundle.
 BUNDLE_IMG ?= $(IMG)-bundle:$(VERSION)
 
@@ -26,8 +22,6 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
-# This is a requirement for 'setup-envtest.sh' in the test target.
-# Options are set to exit when a recipe fails and to output commands.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
