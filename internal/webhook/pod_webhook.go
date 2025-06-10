@@ -26,7 +26,7 @@ import (
 // PodMutator mutates Pods
 type PodMutator struct {
 	Client  client.Client
-	decoder *admission.Decoder
+	decoder admission.Decoder
 }
 
 // shouldManagePod determines if a pod should be managed by our controller
@@ -250,7 +250,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 
 	// Decode the Pod
 	pod := &corev1.Pod{}
-	err := m.decoder.Decode(req, pod)
+	err := m.decoder.DecodeRaw(req.Object, pod)
 	if err != nil {
 		logger.Error(err, "Failed to decode pod")
 		return admission.Errored(http.StatusBadRequest, err)
@@ -287,7 +287,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 
 // InjectDecoder injects the decoder.
 // Called automatically by the controller-runtime framework during webhook setup, before the webhook starts handling requests
-func (m *PodMutator) InjectDecoder(d *admission.Decoder) error {
+func (m *PodMutator) InjectDecoder(d admission.Decoder) error {
 	m.decoder = d
 	return nil
 }
