@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 	"github.com/Jonatanitsko/StatefulSingleton.git/internal/podutil"
@@ -551,7 +550,7 @@ func (r *StatefulSingletonReconciler) updateStatus(
 }
 
 // findObjectsForPod maps pods to StatefulSingleton resources
-func (r *StatefulSingletonReconciler) findObjectsForPod(pod client.Object) []reconcile.Request {
+func (r *StatefulSingletonReconciler) findObjectsForPod(ctx context.Context, pod client.Object) []reconcile.Request {
 	// List all StatefulSingleton resources in the pod's namespace
 	var singletonList appsv1.StatefulSingletonList
 	err := r.List(context.Background(), &singletonList,
@@ -587,8 +586,10 @@ func (r *StatefulSingletonReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&appsv1.StatefulSingleton{}).
 		Owns(&corev1.ConfigMap{}).
 		Watches(
-			&source.Kind{Type: &corev1.Pod{}},
-			handler.EnqueueRequestsFromMapFunc(r.findObjectsForPod),
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return r.findObjectsForPod(ctx, obj)
+			}),
 		).
 		Complete(r)
 }
