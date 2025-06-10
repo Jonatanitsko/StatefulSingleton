@@ -4,12 +4,14 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -287,6 +289,17 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 // Called automatically by the controller-runtime framework during webhook setup, before the webhook starts handling requests
 func (m *PodMutator) InjectDecoder(d *admission.Decoder) error {
 	m.decoder = d
+	return nil
+}
+
+// Default implements admission.CustomDefaulter (required for webhook)
+func (m *PodMutator) Default(ctx context.Context, obj runtime.Object) error {
+	_, ispod := obj.(*corev1.Pod)
+	if !ispod {
+		return fmt.Errorf("expected a Pod object but got %T", obj)
+	}
+	// No logic here as we handle it in the Handle method.
+	// No default behavior should be set for pods!
 	return nil
 }
 

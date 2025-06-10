@@ -1,11 +1,17 @@
-apiVersion: apps.openshift.yourdomain.com/v1
+apiVersion: apps.statefulsingleton.com/v1
 kind: StatefulSingleton
 metadata:
-  name: sample-database
+  labels:
+    app.kubernetes.io/name: statefulsingleton
+    app.kubernetes.io/instance: statefulsingleton-sample
+    app.kubernetes.io/part-of: stateful-singleton
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: stateful-singleton
+  name: statefulsingleton-sample
 spec:
   selector:
     matchLabels:
-      app: postgres-database
+      app: statefulsingleton-sample
   terminationGracePeriod: 120  # 2 minutes
   maxTransitionTime: 300       # 5 minutes total transition timeout
   respectPodGracePeriod: true  # Use pod's grace period if longer
