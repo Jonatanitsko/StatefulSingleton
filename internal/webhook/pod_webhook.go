@@ -62,17 +62,10 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 		pod.Spec.ReadinessGates = []corev1.PodReadinessGate{}
 	}
 
-	readinessGateExists := false
-	for _, gate := range pod.Spec.ReadinessGates {
-		if gate.ConditionType == podutil.SingletonReadyConditionType {
-			readinessGateExists = true
-			break
-		}
-	}
-
-	if !readinessGateExists {
+	// Check if readiness gate already exists, if not add it
+	if !podutil.HasSingletonReadinessGate(pod) {
 		pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{
-			ConditionType: podutil.SingletonReadyConditionType,
+			ConditionType: "statefulsingleton.com/singleton-ready",
 		})
 	}
 
