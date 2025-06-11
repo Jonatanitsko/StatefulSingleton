@@ -34,6 +34,7 @@ import (
 	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 	"github.com/Jonatanitsko/StatefulSingleton.git/controllers"
 	"github.com/Jonatanitsko/StatefulSingleton.git/internal/webhook"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -74,9 +75,10 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "statefulsingleton-operator.apps.statefulsingleton.com",
