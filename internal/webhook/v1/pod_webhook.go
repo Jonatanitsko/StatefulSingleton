@@ -1,5 +1,20 @@
-// In the internal/webhook/pod_webhook.go file, add the import for podutil
-package webhook
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1
 
 import (
 	"context"
@@ -22,6 +37,27 @@ import (
 )
 
 //+kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
+
+// PodCustomDefaulter struct is responsible for setting default values on the custom resource of the
+// Kind Pod when those are created or updated.
+//
+// NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
+// as it is used only for temporary operations and does not need to be deeply copied.
+
+// Default implements admission.CustomDefaulter (required for webhook)
+func (m *PodMutator) Default(ctx context.Context, obj runtime.Object) error {
+	pod, ispod := obj.(*corev1.Pod)
+	logger := log.FromContext(ctx).WithName("pod-webhook")
+
+	if !ispod {
+		return fmt.Errorf("expected an Pod object but got %T", obj)
+	}
+	logger.Info("Defaulting for Pod", "name", pod.GetName())
+
+	// No logic here as we handle it in the Handle method.
+	// No default behavior should be set for pods!
+	return nil
+}
 
 // PodMutator mutates Pods
 type PodMutator struct {
@@ -289,17 +325,6 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 // Called automatically by the controller-runtime framework during webhook setup, before the webhook starts handling requests
 func (m *PodMutator) InjectDecoder(d admission.Decoder) error {
 	m.decoder = d
-	return nil
-}
-
-// Default implements admission.CustomDefaulter (required for webhook)
-func (m *PodMutator) Default(ctx context.Context, obj runtime.Object) error {
-	_, ispod := obj.(*corev1.Pod)
-	if !ispod {
-		return fmt.Errorf("expected a Pod object but got %T", obj)
-	}
-	// No logic here as we handle it in the Handle method.
-	// No default behavior should be set for pods!
 	return nil
 }
 

@@ -54,6 +54,8 @@ spec:
                 default: 300
                 description: MaxTransitionTime is the maximum time in seconds to wait
                   for a transition
+                maximum: 3600
+                minimum: 1
                 type: integer
               respectPodGracePeriod:
                 default: true
@@ -89,11 +91,13 @@ spec:
                           items:
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       required:
                       - key
                       - operator
                       type: object
                     type: array
+                    x-kubernetes-list-type: atomic
                   matchLabels:
                     additionalProperties:
                       type: string

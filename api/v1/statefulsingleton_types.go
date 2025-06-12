@@ -29,6 +29,8 @@ type StatefulSingletonSpec struct {
 	// MaxTransitionTime is the maximum time in seconds to wait for a transition
 	// +optional
 	// +kubebuilder:default:=300
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
 	MaxTransitionTime int `json:"maxTransitionTime,omitempty"`
 
 	// TerminationGracePeriod is the grace period in seconds for pod termination

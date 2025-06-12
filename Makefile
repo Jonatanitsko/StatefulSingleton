@@ -28,8 +28,8 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# statefulsingleton.com/memcached-operator-bundle:$VERSION and statefulsingleton.com/memcached-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= statefulsingleton.com/memcached-operator
+# statefulsingleton.com/stateful-singleton-bundle:$VERSION and statefulsingleton.com/stateful-singleton-catalog:$VERSION.
+IMAGE_TAG_BASE ?= statefulsingleton.com/stateful-singleton
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -63,7 +63,7 @@ endif
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
-CONTAINER_TOOL ?= docker
+CONTAINER_TOOL ?= podman
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -164,10 +164,10 @@ PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name memcached-operator-builder
-	$(CONTAINER_TOOL) buildx use memcached-operator-builder
+	- $(CONTAINER_TOOL) buildx create --name stateful-singleton-builder
+	$(CONTAINER_TOOL) buildx use stateful-singleton-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm memcached-operator-builder
+	- $(CONTAINER_TOOL) buildx rm stateful-singleton-builder
 	rm Dockerfile.cross
 
 .PHONY: build-installer

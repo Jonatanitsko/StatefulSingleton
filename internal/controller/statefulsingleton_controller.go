@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package controllers implements the core reconciliation logic for the StatefulSingleton operator
-package controllers
+package controller
 
 import (
 	"context"
