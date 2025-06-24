@@ -30,6 +30,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -53,28 +56,37 @@ var (
 	testEnv   *envtest.Environment
 )
 
+// TestAPIs is the entry point for running the webhook test suite
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
 
 	RunSpecs(t, "Webhook Suite")
 }
 
+// BeforeSuite runs once before all webhook tests
+// It sets up the test environment including the webhook server
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
+	// Register our API types with the scheme
 	var err error
+	err = appsv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	err = corev1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
+	// Create test environment with webhook support
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: false,
 
+		// Enable webhook testing
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
 			Paths: []string{filepath.Join("..", "..", "..", "config", "webhook")},
 		},
@@ -85,11 +97,12 @@ var _ = BeforeSuite(func() {
 		testEnv.BinaryAssetsDirectory = getFirstFoundEnvTestBinaryDir()
 	}
 
-	// cfg is defined in this file globally.
+	// Start the test environment (includes webhook server)
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
+	// Create Kubernetes client
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
@@ -108,11 +121,15 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	err = SetupWithManager(mgr)
+	// Register our webhook with the manager
+	err = (&PodMutator{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:webhook
 
+	// Start the manager (webhook server) in a goroutine
 	go func() {
 		defer GinkgoRecover()
 		err = mgr.Start(ctx)
@@ -132,6 +149,7 @@ var _ = BeforeSuite(func() {
 	}).Should(Succeed())
 })
 
+// AfterSuite runs once after all webhook tests
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
@@ -160,4 +178,47 @@ func getFirstFoundEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+// Helper function to create a test namespace
+func createTestNamespace(name string) *corev1.Namespace {
+	ns := &corev1.Namespace{}
+	ns.Name = name
+	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+	return ns
+}
+
+// Helper function to create a basic StatefulSingleton resource for webhook testing
+func createBasicStatefulSingleton(name, namespace string, selector map[string]string) *appsv1.StatefulSingleton {
+	stss := &appsv1.StatefulSingleton{}
+	stss.Name = name
+	stss.Namespace = namespace
+	stss.Spec.Selector.MatchLabels = selector
+	stss.Spec.MaxTransitionTime = 300
+	stss.Spec.TerminationGracePeriod = 30
+	stss.Spec.RespectPodGracePeriod = true
+
+	Expect(k8sClient.Create(ctx, stss)).To(Succeed())
+	return stss
+}
+
+// Helper function to create a basic pod spec for testing webhook mutations
+func createBasicPodSpec(name, namespace string, labels map[string]string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "test-container",
+					Image:   "nginx:latest",
+					Command: []string{"/usr/sbin/nginx"},
+					Args:    []string{"-g", "daemon off;"},
+				},
+			},
+		},
+	}
 }
