@@ -17,351 +17,696 @@ limitations under the License.
 package e2e
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/Jonatanitsko/StatefulSingleton.git/test/utils"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	statefulsingleton "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 )
 
-// namespace where the project is deployed in
-const namespace = "stateful-singleton-system"
+// E2E tests for StatefulSingleton operator
+// These tests run against a real cluster (Kind) with the operator deployed
+var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
+	var (
+		testNamespace = "e2e-test-statefulsingleton"
+		ctx           = context.Background()
+		k8sClient     client.Client
+	)
 
-// serviceAccountName created for the project
-const serviceAccountName = "stateful-singleton-controller-manager"
-
-// metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "stateful-singleton-controller-manager-metrics-service"
-
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "stateful-singleton-metrics-binding"
-
-var _ = Describe("Manager", Ordered, func() {
-	var controllerPodName string
-
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
+	// BeforeAll runs once before all tests in this Describe block
 	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		By("setting up k8s client")
+		cfg, err := config.GetConfig()
+		Expect(err).NotTo(HaveOccurred())
 
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+		k8sClient, err := client.New(cfg, client.Options{Scheme: scheme.Scheme})
+		Expect(err).NotTo(HaveOccurred())
 
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-	})
-
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	AfterAll(func() {
-		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
-		_, _ = utils.Run(cmd)
-
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
-	})
-
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
-	AfterEach(func() {
-		specReport := CurrentSpecReport()
-		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-			controllerLogs, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
-			}
-
-			By("Fetching Kubernetes events")
-			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
-			eventsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
-			}
-
-			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-			metricsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get curl-metrics logs: %s", err)
-			}
-
-			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
-			podDescription, err := utils.Run(cmd)
-			if err == nil {
-				fmt.Println("Pod description:\n", podDescription)
-			} else {
-				fmt.Println("Failed to describe controller pod")
-			}
+		By("creating test namespace")
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
+		err = k8sClient.Create(ctx, ns)
+		if err != nil {
+			// Namespace might already exist
+			Expect(err).NotTo(HaveOccurred())
 		}
 	})
 
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
+	// AfterAll runs once after all tests in this Describe block
+	AfterAll(func() {
+		By("cleaning up test namespace")
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testNamespace,
+			},
+		}
+		err := k8sClient.Delete(ctx, ns)
+		if err != nil && !errors.IsNotFound(err) {
+			GinkgoLogr.Error(err, "Failed to delete test namespace")
+		}
+	})
 
-	Context("Manager", func() {
-		It("should run successfully", func() {
-			By("validating that the controller-manager pod is running as expected")
-			verifyControllerUp := func(g Gomega) {
-				// Get the name of the controller-manager pod
-				cmd := exec.Command("kubectl", "get",
-					"pods", "-l", "control-plane=controller-manager",
-					"-o", "go-template={{ range .items }}"+
-						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
-					"-n", namespace,
-				)
+	Context("Basic StatefulSingleton functionality", func() {
+		var (
+			singletonName  = "test-singleton"
+			deploymentName = "test-deployment"
+		)
 
-				podOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
-				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
-				controllerPodName = podNames[0]
-				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+		AfterEach(func() {
+			// Clean up resources after each test
+			By("cleaning up test resources")
 
-				// Validate the pod's status
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+			// Delete StatefulSingleton
+			ss := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
 			}
-			Eventually(verifyControllerUp).Should(Succeed())
+			_ = k8sClient.Delete(ctx, ss)
+
+			// Delete Deployment
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, deployment)
+
+			// Delete any remaining pods
+			podList := &corev1.PodList{}
+			_ = k8sClient.List(ctx, podList, client.InNamespace(testNamespace))
+			for _, pod := range podList.Items {
+				_ = k8sClient.Delete(ctx, &pod)
+			}
+
+			// Wait for cleanup to complete
+			time.Sleep(5 * time.Second)
 		})
 
-		It("should ensure the metrics endpoint is serving metrics", func() {
-			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=stateful-singleton-metrics-reader",
-				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
-			)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
-
-			By("validating that the metrics service is available")
-			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
-
-			By("getting the service account token")
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-
-			By("waiting for the metrics endpoint to be ready")
-			verifyMetricsEndpointReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "endpoints", metricsServiceName, "-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("8443"), "Metrics endpoint is not ready")
+		It("should create and manage a simple StatefulSingleton with deployment", func() {
+			labels := map[string]string{
+				"app":        "nginx",
+				"managed-by": "statefulsingleton",
 			}
-			Eventually(verifyMetricsEndpointReady).Should(Succeed())
 
-			By("verifying that the controller manager is serving the metrics server")
-			verifyMetricsServerStarted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("controller-runtime.metrics\tServing metrics server"),
-					"Metrics server not yet started")
+			By("creating a StatefulSingleton resource")
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TerminationGracePeriod: 30,
+					MaxTransitionTime:      120,
+					RespectPodGracePeriod:  true,
+				},
 			}
-			Eventually(verifyMetricsServerStarted).Should(Succeed())
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
-			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image=curlimages/curl:latest",
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "curlimages/curl:latest",
-							"command": ["/bin/sh", "-c"],
-							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
-							"securityContext": {
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
+			By("creating a deployment with matching labels")
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "nginx",
+									Image: "nginx:1.21",
+									Ports: []corev1.ContainerPort{
+										{ContainerPort: 80},
+									},
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceMemory: resource.MustParse("64Mi"),
+											corev1.ResourceCPU:    resource.MustParse("50m"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceMemory: resource.MustParse("128Mi"),
+											corev1.ResourceCPU:    resource.MustParse("100m"),
+										},
+									},
 								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
-								}
-							}
-						}],
-						"serviceAccount": "%s"
-					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
-
-			By("waiting for the curl-metrics pod to complete.")
-			verifyCurlUp := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
-					"-o", "jsonpath={.status.phase}",
-					"-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
+							},
+						},
+					},
+				},
 			}
-			Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			By("getting the metrics by checking curl-metrics logs")
-			metricsOutput := getMetricsOutput()
-			Expect(metricsOutput).To(ContainSubstring(
-				"controller_runtime_reconcile_total",
-			))
+			By("waiting for the StatefulSingleton to show Running status")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
+
+			By("verifying the pod was created and managed")
+			Eventually(func() int {
+				var podList corev1.PodList
+				err := k8sClient.List(ctx, &podList,
+					client.InNamespace(testNamespace),
+					client.MatchingLabels(labels))
+				if err != nil {
+					return 0
+				}
+				return len(podList.Items)
+			}, 1*time.Minute, 5*time.Second).Should(Equal(1))
+
+			By("verifying the pod has the required readiness gate")
+			var pod corev1.Pod
+			Eventually(func() error {
+				var podList corev1.PodList
+				err := k8sClient.List(ctx, &podList,
+					client.InNamespace(testNamespace),
+					client.MatchingLabels(labels))
+				if err != nil || len(podList.Items) == 0 {
+					return fmt.Errorf("pod not found")
+				}
+				pod = podList.Items[0]
+				return nil
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			// Check readiness gate
+			var hasReadinessGate bool
+			for _, gate := range pod.Spec.ReadinessGates {
+				if string(gate.ConditionType) == "statefulsingleton.com/singleton-ready" {
+					hasReadinessGate = true
+					break
+				}
+			}
+			Expect(hasReadinessGate).To(BeTrue(), "Pod should have StatefulSingleton readiness gate")
+
+			By("verifying the pod has the wrapper script volume")
+			var hasWrapperVolume bool
+			for _, volume := range pod.Spec.Volumes {
+				if volume.Name == "wrapper-scripts" {
+					hasWrapperVolume = true
+					break
+				}
+			}
+			Expect(hasWrapperVolume).To(BeTrue(), "Pod should have wrapper-scripts volume")
+
+			By("verifying the pod has the status sidecar container")
+			var hasSidecar bool
+			for _, container := range pod.Spec.Containers {
+				if container.Name == "status-sidecar" {
+					hasSidecar = true
+					break
+				}
+			}
+			Expect(hasSidecar).To(BeTrue(), "Pod should have status-sidecar container")
+
+			By("verifying the StatefulSingleton status shows the active pod")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.ActivePod
+			}, 30*time.Second, 2*time.Second).Should(Equal(pod.Name))
 		})
 
-		It("should provisioned cert-manager", func() {
-			By("validating that cert-manager has the certificate Secret")
-			verifyCertManager := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "webhook-server-cert", "-n", namespace)
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
+		It("should handle rolling updates correctly", func() {
+			labels := map[string]string{
+				"app": "nginx-rolling",
 			}
-			Eventually(verifyCertManager).Should(Succeed())
+
+			By("creating initial StatefulSingleton and deployment")
+			// Create StatefulSingleton
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TerminationGracePeriod: 10,
+					MaxTransitionTime:      60,
+				},
+			}
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			// Create deployment with initial image
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Strategy: appsv1.DeploymentStrategy{
+						Type: appsv1.RecreateDeploymentStrategyType,
+					},
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "nginx",
+									Image: "nginx:1.20", // Initial image
+									Ports: []corev1.ContainerPort{
+										{ContainerPort: 80},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			By("waiting for initial deployment to be ready")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
+
+			// Get the initial pod name
+			var initialPodName string
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				initialPodName = ss.Status.ActivePod
+				return initialPodName
+			}, 30*time.Second, 2*time.Second).ShouldNot(BeEmpty())
+
+			By("triggering a rolling update")
+			// Update the deployment image
+			Eventually(func() error {
+				var currentDeployment appsv1.Deployment
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: deploymentName, Namespace: testNamespace,
+				}, &currentDeployment)
+				if err != nil {
+					return err
+				}
+
+				// Update the image
+				currentDeployment.Spec.Template.Spec.Containers[0].Image = "nginx:1.21"
+				return k8sClient.Update(ctx, &currentDeployment)
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			By("verifying transition phase is entered")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 1*time.Minute, 2*time.Second).Should(Equal("Transitioning"))
+
+			By("verifying transition completes successfully")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 3*time.Minute, 5*time.Second).Should(Equal("Running"))
+
+			By("verifying the new pod is different from the initial pod")
+			var newPodName string
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				newPodName = ss.Status.ActivePod
+				return newPodName
+			}, 30*time.Second, 2*time.Second).ShouldNot(Equal(initialPodName))
+
+			By("verifying the new pod is running the updated image")
+			Eventually(func() string {
+				var pod corev1.Pod
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: newPodName, Namespace: testNamespace,
+				}, &pod)
+				if err != nil {
+					return ""
+				}
+				if len(pod.Spec.Containers) == 0 {
+					return ""
+				}
+				return pod.Spec.Containers[0].Image
+			}, 30*time.Second, 2*time.Second).Should(Equal("nginx:1.21"))
 		})
 
-		It("should have CA injection for mutating webhooks", func() {
-			By("checking CA injection for mutating webhooks")
-			verifyCAInjection := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get",
-					"mutatingwebhookconfigurations.admissionregistration.k8s.io",
-					"stateful-singleton-mutating-webhook-configuration",
-					"-o", "go-template={{ range .webhooks }}{{ .clientConfig.caBundle }}{{ end }}")
-				mwhOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(len(mwhOutput)).To(BeNumerically(">", 10))
+		It("should handle pod failures and replacements", func() {
+			labels := map[string]string{
+				"app": "nginx-failure",
 			}
-			Eventually(verifyCAInjection).Should(Succeed())
+
+			By("creating StatefulSingleton and deployment")
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TerminationGracePeriod: 5,
+					MaxTransitionTime:      30,
+				},
+			}
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "nginx",
+									Image: "nginx:1.21",
+									Ports: []corev1.ContainerPort{
+										{ContainerPort: 80},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			By("waiting for initial pod to be ready")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
+
+			// Get initial pod name
+			var initialPodName string
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				initialPodName = ss.Status.ActivePod
+				return initialPodName
+			}, 30*time.Second, 2*time.Second).ShouldNot(BeEmpty())
+
+			By("deleting the active pod to simulate failure")
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      initialPodName,
+					Namespace: testNamespace,
+				},
+			}
+			Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+
+			By("verifying a new pod is created and becomes active")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.ActivePod
+			}, 2*time.Minute, 5*time.Second).ShouldNot(Equal(initialPodName))
+
+			By("verifying the StatefulSingleton returns to Running state")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 1*time.Minute, 5*time.Second).Should(Equal("Running"))
+		})
+	})
+
+	Context("ConfigMap management", func() {
+		var singletonName = "configmap-test-singleton"
+
+		AfterEach(func() {
+			By("cleaning up configmap test resources")
+			// Delete StatefulSingleton
+			ss := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, ss)
+
+			// Delete ConfigMap
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "statefulsingleton-wrapper",
+					Namespace: testNamespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, cm)
 		})
 
-		It("should have CA injection for validating webhooks", func() {
-			By("checking CA injection for validating webhooks")
-			verifyCAInjection := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get",
-					"validatingwebhookconfigurations.admissionregistration.k8s.io",
-					"stateful-singleton-validating-webhook-configuration",
-					"-o", "go-template={{ range .webhooks }}{{ .clientConfig.caBundle }}{{ end }}")
-				vwhOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(len(vwhOutput)).To(BeNumerically(">", 10))
+		It("should create and manage the wrapper ConfigMap", func() {
+			By("creating a StatefulSingleton")
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      singletonName,
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app": "configmap-test",
+						},
+					},
+				},
 			}
-			Eventually(verifyCAInjection).Should(Succeed())
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("waiting for the controller to process the StatefulSingleton")
+			time.Sleep(10 * time.Second)
+
+			By("verifying the wrapper ConfigMap was created")
+			var configMap corev1.ConfigMap
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name: "statefulsingleton-wrapper", Namespace: testNamespace,
+				}, &configMap)
+			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the ConfigMap contains the wrapper script")
+			Expect(configMap.Data).To(HaveKey("entrypoint-wrapper.sh"))
+			wrapperScript := configMap.Data["entrypoint-wrapper.sh"]
+			Expect(wrapperScript).To(ContainSubstring("StatefulSingleton"))
+			Expect(wrapperScript).To(ContainSubstring("start-signal"))
+			Expect(wrapperScript).To(ContainSubstring("ORIGINAL_ENTRYPOINT"))
+		})
+	})
+
+	Context("Error handling and edge cases", func() {
+		It("should handle StatefulSingleton with minimal selector gracefully", func() {
+			By("creating StatefulSingleton with minimal selector")
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "minimal-singleton",
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							// Minimal selector
+							"test": "minimal",
+						},
+					},
+					TerminationGracePeriod: 30,
+				},
+			}
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("verifying the StatefulSingleton is created but shows no active pods")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: "minimal-singleton", Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 30*time.Second, 5*time.Second).Should(Equal("Running"))
+
+			var ss statefulsingleton.StatefulSingleton
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: "minimal-singleton", Namespace: testNamespace,
+			}, &ss)).To(Succeed())
+			Expect(ss.Status.Message).To(Equal("No pods found"))
+
+			// Cleanup
+			Expect(k8sClient.Delete(ctx, &ss)).To(Succeed())
 		})
 
-		// +kubebuilder:scaffold:e2e-webhooks-checks
+		It("should respect custom termination grace periods", func() {
+			labels := map[string]string{
+				"app": "custom-grace-test",
+			}
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+			By("creating StatefulSingleton with custom grace period")
+			singleton := &statefulsingleton.StatefulSingleton{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "custom-grace-singleton",
+					Namespace: testNamespace,
+				},
+				Spec: statefulsingleton.StatefulSingletonSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TerminationGracePeriod: 60,
+					RespectPodGracePeriod:  false,
+				},
+			}
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("creating deployment with different grace period")
+			gracePeriod := int64(30)
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "custom-grace-deployment",
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							TerminationGracePeriodSeconds: &gracePeriod, // 30 seconds
+							Containers: []corev1.Container{
+								{
+									Name:  "nginx",
+									Image: "nginx:1.21",
+									Ports: []corev1.ContainerPort{
+										{ContainerPort: 80},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			By("verifying the pod gets the StatefulSingleton's grace period")
+			Eventually(func() *int64 {
+				var podList corev1.PodList
+				err := k8sClient.List(ctx, &podList,
+					client.InNamespace(testNamespace),
+					client.MatchingLabels(labels))
+				if err != nil || len(podList.Items) == 0 {
+					return nil
+				}
+				return podList.Items[0].Spec.TerminationGracePeriodSeconds
+			}, 1*time.Minute, 5*time.Second).Should(Equal(int64Ptr(60)))
+
+			// Cleanup
+			Expect(k8sClient.Delete(ctx, singleton)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, deployment)).To(Succeed())
+		})
 	})
 })
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
-func serviceAccountToken() (string, error) {
-	const tokenRequestRawString = `{
-		"apiVersion": "authentication.k8s.io/v1",
-		"kind": "TokenRequest"
-	}`
-
-	// Temporary file to store the token request
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
-	tokenRequestFile := filepath.Join("/tmp", secretName)
-	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
-	if err != nil {
-		return "", err
-	}
-
-	var out string
-	verifyTokenCreation := func(g Gomega) {
-		// Execute kubectl command to create the token
-		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
-			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			namespace,
-			serviceAccountName,
-		), "-f", tokenRequestFile)
-
-		output, err := cmd.CombinedOutput()
-		g.Expect(err).NotTo(HaveOccurred())
-
-		// Parse the JSON output to extract the token
-		var token tokenRequest
-		err = json.Unmarshal(output, &token)
-		g.Expect(err).NotTo(HaveOccurred())
-
-		out = token.Status.Token
-	}
-	Eventually(verifyTokenCreation).Should(Succeed())
-
-	return out, err
+// Helper functions
+func int32Ptr(i int32) *int32 {
+	return &i
 }
 
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() string {
-	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-	metricsOutput, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-	Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
-	return metricsOutput
-}
-
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
-type tokenRequest struct {
-	Status struct {
-		Token string `json:"token"`
-	} `json:"status"`
+func int64Ptr(i int64) *int64 {
+	return &i
 }

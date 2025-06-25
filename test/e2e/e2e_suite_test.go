@@ -25,6 +25,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/client-go/kubernetes/scheme"
+
+	statefulsingleton "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 	"github.com/Jonatanitsko/StatefulSingleton.git/test/utils"
 )
 
@@ -53,9 +56,14 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// Register our API types with the default scheme for client usage
+	By("registering StatefulSingleton API types")
+	err := statefulsingleton.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred(), "Failed to register StatefulSingleton types with scheme")
+
 	By("building the manager(Operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
-	_, err := utils.Run(cmd)
+	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
@@ -78,12 +86,34 @@ var _ = BeforeSuite(func() {
 			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CertManager is already installed. Skipping installation...\n")
 		}
 	}
+
+	By("deploying the operator to the cluster")
+	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the operator")
+
+	// Wait for operator to be ready
+	By("waiting for operator to be ready")
+	cmd = exec.Command("kubectl", "wait", "deployment/stateful-singleton-controller-manager",
+		"--for=condition=Available",
+		"--namespace=stateful-singleton-system",
+		"--timeout=300s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Operator deployment did not become ready in time")
+
+	_, _ = fmt.Fprintf(GinkgoWriter, "E2E test environment setup complete\n")
 })
 
 var _ = AfterSuite(func() {
+	By("undeploying the operator")
+	cmd := exec.Command("make", "undeploy")
+	_, _ = utils.Run(cmd)
+
 	// Teardown CertManager after the suite if not skipped and if it was not already installed
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")
 		utils.UninstallCertManager()
 	}
+
+	_, _ = fmt.Fprintf(GinkgoWriter, "E2E test environment cleanup complete\n")
 })
