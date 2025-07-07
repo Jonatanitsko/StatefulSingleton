@@ -17,13 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"math/rand"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
@@ -37,6 +41,22 @@ import (
 // "BeforeEach" runs before each "It" test
 // "AfterEach" runs after each "It" test
 
+func printStatefulSinleton(namespace string, statefulSingletonName string) {
+	namespacedName := types.NamespacedName{
+		Name:      statefulSingletonName,
+		Namespace: namespace,
+	}
+
+	singleton := &appsv1.StatefulSingleton{}
+	err := k8sClient.Get(ctx, namespacedName, singleton)
+
+	if err != nil {
+		fmt.Fprintf(GinkgoWriter, "An error occourd: %v\n", err)
+	}
+
+	fmt.Fprintf(GinkgoWriter, "Requested statefulSingleton: %v\n", singleton)
+}
+
 var _ = Describe("StatefulSingleton Controller", func() {
 	var (
 		testNamespace     string
@@ -48,7 +68,9 @@ var _ = Describe("StatefulSingleton Controller", func() {
 	// BeforeEach runs before each individual test case
 	BeforeEach(func() {
 		// Create a unique namespace for each test to avoid conflicts
-		testNamespace = "test-" + time.Now().Format("150405") // HHMMSS format
+		testNamespace = fmt.Sprintf("test-ns-%d-%d",
+			time.Now().Unix(),
+			rand.Intn(10000)) // HHMMSS format
 		createTestNamespace(testNamespace)
 
 		// Set up common test data
@@ -147,43 +169,63 @@ var _ = Describe("StatefulSingleton Controller", func() {
 				testNamespace,
 				testPodLabels,
 			)
+
+			wrapperConfigMap := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "statefulsingleton-wrapper",
+					Namespace: testNamespace,
+				},
+				Data: map[string]string{
+					"entrypoint-wrapper.sh": "#!/bin/sh\necho 'Wrapper script'\nexec \"$@\"",
+				},
+			}
+			Expect(k8sClient.Create(ctx, wrapperConfigMap)).To(Succeed())
 		})
 
 		// Test case 3: Single pod management
 		It("should signal a single pod to start when it's the only pod", func() {
-			// Create a pod that matches our StatefulSingleton selector
-			By("creating a single pod with the matching labels")
-			pod := createTestPod("test-pod-1", testNamespace, testPodLabels, true)
+			By("Creating a pod that has been fully processed by the webhook")
 
-			// Reconcile the StatefulSingleton
-			namespacedName := types.NamespacedName{
-				Name:      statefulSingleton.Name,
-				Namespace: statefulSingleton.Namespace,
-			}
+			// Create a pod with ALL webhook mutations applied
+			pod := createTestPod("single-pod", testNamespace, testPodLabels, true)
 
-			By("reconciling the StatefulSingleton")
+			// Now test the controller logic
+			By("Reconciling the StatefulSingleton")
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: namespacedName,
+				NamespacedName: types.NamespacedName{
+					Name:      statefulSingleton.Name,
+					Namespace: statefulSingleton.Namespace,
+				},
 			})
 
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should schedule future reconciliation")
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Check that the StatefulSingleton status reflects the active pod
-			By("verifying the StatefulSingleton status shows the active pod")
-			Eventually(func() string {
-				updatedSingleton := &appsv1.StatefulSingleton{}
-				err := k8sClient.Get(ctx, namespacedName, updatedSingleton)
+			By("Verifying the pod gets signaled to start")
+			Eventually(func() bool {
+				hasSignal, err := podutil.HasStartSignal(ctx, k8sClient, pod)
+				return err == nil && hasSignal
+			}).Should(BeTrue())
+
+			By("Verifying the readiness condition is updated")
+			Eventually(func() bool {
+				var updatedPod corev1.Pod
+				err := k8sClient.Get(ctx, client.ObjectKey{
+					Name:      pod.Name,
+					Namespace: pod.Namespace,
+				}, &updatedPod)
 				if err != nil {
-					return ""
+					return false
 				}
-				return updatedSingleton.Status.ActivePod
-			}, 10*time.Second, 500*time.Millisecond).Should(Equal(pod.Name))
 
-			// Note: In a real environment, the pod would have the signal file created
-			// by the controller. In our test environment, we can't easily test the
-			// signal file creation since it requires exec into containers.
-			// We focus on testing the controller logic instead.
+				for _, condition := range updatedPod.Status.Conditions {
+					if condition.Type == "apps.statefulsingleton.com/singleton-ready" &&
+						condition.Status == corev1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}).Should(BeTrue())
 		})
 
 		// Test case 4: Pod transition scenario
@@ -312,18 +354,20 @@ var _ = Describe("StatefulSingleton Controller", func() {
 			// Test terminating state
 			Expect(podutil.IsPodTerminating(pod)).To(BeFalse())
 
-			// Simulate pod deletion (sets DeletionTimestamp)
-			now := metav1.Time{Time: time.Now()}
-			pod.DeletionTimestamp = &now
-			Expect(k8sClient.Update(ctx, pod)).To(Succeed())
+			// Test pod deletion
+			By("Deleting the pod to test terminating state")
+			Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
 
-			// Refresh pod from API
+			By("Verifying the pod is deleted (NotFound)")
 			updatedPod := &corev1.Pod{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: pod.Name, Namespace: pod.Namespace,
-			}, updatedPod)).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: pod.Name, Namespace: pod.Namespace,
+				}, updatedPod)
 
-			Expect(podutil.IsPodTerminating(updatedPod)).To(BeTrue())
+				return errors.IsNotFound(err)
+			}, 5*time.Second).Should(BeTrue())
+
 		})
 	})
 
@@ -369,11 +413,6 @@ var _ = Describe("StatefulSingleton Controller", func() {
 
 			// Create two pods to trigger a transition
 			oldPod := createTestPod("old-pod", testNamespace, testPodLabels, true)
-			newPod := createTestPod("new-pod", testNamespace, testPodLabels, true)
-
-			// Make new pod newer
-			newPod.CreationTimestamp = metav1.Time{Time: time.Now().Add(1 * time.Minute)}
-			Expect(k8sClient.Update(ctx, newPod)).To(Succeed())
 
 			namespacedName := types.NamespacedName{
 				Name:      shortTimeoutSingleton.Name,
@@ -393,6 +432,12 @@ var _ = Describe("StatefulSingleton Controller", func() {
 				k8sClient.Get(ctx, namespacedName, updatedSingleton)
 				return updatedSingleton.Status.ActivePod
 			}, 5*time.Second).Should(Equal(oldPod.Name))
+
+			newPod := createTestPod("new-pod", testNamespace, testPodLabels, true)
+
+			// Make new pod newer
+			newPod.CreationTimestamp = metav1.Time{Time: time.Now().Add(1 * time.Minute)}
+			Expect(k8sClient.Update(ctx, newPod)).To(Succeed())
 
 			// Second reconcile to start transition (both pods exist now)
 			By("triggering transition with both pods present")

@@ -27,6 +27,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -109,7 +112,7 @@ var _ = BeforeSuite(func() {
 
 	// Create a manager that will run our controller
 	// We don't start it here - individual tests can choose whether to start it
-	testMgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	testMgr, err = ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:  scheme.Scheme,
 		Metrics: metricsServerOptions, // Disable metrics server in tests
 	})
@@ -179,51 +182,158 @@ func createBasicStatefulSingleton(name, namespace string, selector map[string]st
 }
 
 // Helper function to create a test pod with specific labels
-func createTestPod(name, namespace string, labels map[string]string, hasReadinessGate bool) *corev1.Pod {
-	pod := &corev1.Pod{}
-	pod.Name = name
-	pod.Namespace = namespace
-	pod.Labels = labels
+func createTestPod(name string, namespace string, labels map[string]string, artificialStateful bool) *corev1.Pod {
 
-	// Basic pod spec
-	pod.Spec.Containers = []corev1.Container{
-		{
-			Name:  "test-container",
-			Image: "nginx:latest",
+	randPodName := name + rand.String(6)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      randPodName,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "nginx",
+					Image: "nginx:latest",
+				},
+			},
 		},
 	}
 
-	// Add readiness gate if requested (simulates webhook injection)
-	if hasReadinessGate {
+	if artificialStateful {
+		// Add the correct readiness gate condition type
 		pod.Spec.ReadinessGates = []corev1.PodReadinessGate{
 			{
 				ConditionType: "apps.statefulsingleton.com/singleton-ready",
 			},
 		}
+
+		// Add management annotation
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations["apps.statefulsingleton.com/singleton-managed"] = "true"
+
+		// Modify main container to include volume mounts (like webhook does)
+		pod.Spec.Containers[0].Command = []string{"/opt/wrapper/entrypoint-wrapper.sh"}
+		pod.Spec.Containers[0].Env = []corev1.EnvVar{
+			{
+				Name:  "ORIGINAL_ENTRYPOINT",
+				Value: `{"command":["nginx"],"args":["-g","daemon off;"]}`,
+			},
+		}
+		pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+			{
+				Name:      "signal-volume",
+				MountPath: "/var/run/signal",
+			},
+			{
+				Name:      "wrapper-scripts",
+				MountPath: "/opt/wrapper",
+			},
+		}
+
+		// Add status-sidecar container (webhook adds this)
+		sidecarContainer := corev1.Container{
+			Name:    "status-sidecar",
+			Image:   "registry.access.redhat.com/ubi8/ubi-minimal:latest",
+			Command: []string{"/bin/sh", "-c"},
+			Args:    []string{"mkdir -p /var/run/signal && while true; do sleep 30; done"},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "signal-volume",
+					MountPath: "/var/run/signal",
+				},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("10m"),
+					corev1.ResourceMemory: resource.MustParse("32Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("20m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+		}
+		pod.Spec.Containers = append(pod.Spec.Containers, sidecarContainer)
+
+		// Add volumes that webhook creates
+		defaultMode := int32(0755)
+		pod.Spec.Volumes = []corev1.Volume{
+			{
+				Name: "signal-volume",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			},
+			{
+				Name: "wrapper-scripts",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "statefulsingleton-wrapper",
+						},
+						DefaultMode: &defaultMode,
+					},
+				},
+			},
+		}
 	}
 
+	// Create the pod first
 	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 
-	// Set pod to Running status
-	pod.Status.Phase = corev1.PodRunning
-	// Initialize conditions slice
-	pod.Status.Conditions = []corev1.PodCondition{
+	// Wait for pod to be created
+	Eventually(func() error {
+		return k8sClient.Get(ctx, client.ObjectKey{
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+		}, pod)
+	}).Should(Succeed())
+
+	// Set pod status to Running (envtest can't do this automatically)
+	containerStatuses := []corev1.ContainerStatus{
 		{
-			Type:   corev1.PodReady,
-			Status: corev1.ConditionFalse, // Start as not ready
+			Name:  "nginx",
+			Ready: true,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{
+					StartedAt: metav1.Time{Time: time.Now()},
+				},
+			},
 		},
 	}
 
-	// Add the singleton readiness condition if we have the gate
-	if hasReadinessGate {
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-			Type:    "apps.statefulsingleton.com/singleton-ready",
-			Status:  corev1.ConditionFalse,
-			Message: "Waiting for singleton controller",
+	// Add sidecar status if this pod has readiness gate
+	if artificialStateful {
+		containerStatuses = append(containerStatuses, corev1.ContainerStatus{
+			Name:  "status-sidecar",
+			Ready: true,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{
+					StartedAt: metav1.Time{Time: time.Now()},
+				},
+			},
 		})
 	}
 
+	pod.Status = corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		ContainerStatuses: containerStatuses,
+		Conditions: []corev1.PodCondition{
+			{
+				Type:               corev1.PodReady,
+				Status:             corev1.ConditionFalse, // Start as not ready for controlled tests
+				LastTransitionTime: metav1.Time{Time: time.Now()},
+			},
+		},
+	}
+
+	// Update the pod status
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
 	return pod
 }
 

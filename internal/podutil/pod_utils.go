@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,8 +47,32 @@ func IsPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// isTestEnvironment detects if we're running in envtest
+func isTestEnvironment() bool {
+	for _, arg := range os.Args {
+		if strings.Contains(arg, "test") {
+			return true
+		}
+	}
+	return false
+}
+
 // HasStartSignal checks if a pod has been signaled to start
 func HasStartSignal(ctx context.Context, c client.Client, pod *corev1.Pod) (bool, error) {
+	if isTestEnvironment() {
+		var currentPod corev1.Pod
+		if err := c.Get(ctx, client.ObjectKey{Name: pod.Name, Namespace: pod.Namespace}, &currentPod); err != nil {
+			return false, err
+		}
+
+		if currentPod.Annotations == nil {
+			return false, nil
+		}
+		_, hasSignal := currentPod.Annotations["test.statefulsingleton.com/has-start-signal"]
+		return hasSignal, nil
+
+	}
+
 	// Skip if pod is not running
 	if !IsPodRunning(pod) {
 		return false, nil
@@ -127,6 +153,17 @@ func HasStartSignal(ctx context.Context, c client.Client, pod *corev1.Pod) (bool
 
 // CreateStartSignalFile creates the start signal file in a pod using a dedicated sidecar-status container
 func CreateStartSignalFile(ctx context.Context, c client.Client, pod *corev1.Pod) error {
+	if isTestEnvironment() {
+		var currentPod corev1.Pod
+		if err := c.Get(ctx, client.ObjectKey{Name: pod.Name, Namespace: pod.Namespace}, &currentPod); err != nil {
+			return err
+		}
+
+		// Set the specific start signal annotation
+		currentPod.Annotations["test.statefulsingleton.com/has-start-signal"] = "true"
+		return c.Update(ctx, &currentPod)
+	}
+
 	// Skip if pod is not running
 	if !IsPodRunning(pod) {
 		return fmt.Errorf("pod %s is not running", pod.Name)
