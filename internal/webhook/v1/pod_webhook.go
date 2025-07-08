@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -30,61 +29,75 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
-	"github.com/Jonatanitsko/StatefulSingleton.git/internal/podutil"
 )
 
-//+kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
+// PodDefaulter implements the defaulting webhook for Pods
+type PodDefaulter struct {
+	Client client.Client
+}
 
-// PodCustomDefaulter struct is responsible for setting default values on the custom resource of the
-// Kind Pod when those are created or updated.
-//
-// NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
-// as it is used only for temporary operations and does not need to be deeply copied.
+var _ webhook.CustomDefaulter = &PodDefaulter{}
 
-// Default implements admission.CustomDefaulter (required for webhook)
-func (m *PodMutator) Default(ctx context.Context, obj runtime.Object) error {
-	pod, ispod := obj.(*corev1.Pod)
-	logger := log.FromContext(ctx).WithName("pod-webhook")
+const signalStartRequeueTime string = "10"
 
-	if !ispod {
-		return fmt.Errorf("expected an Pod object but got %T", obj)
+//+kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
+
+// Default implements the defaulting logic for Pods
+func (r *PodDefaulter) Default(ctx context.Context, obj runtime.Object) error {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return fmt.Errorf("expected a Pod but got a %T", obj)
 	}
-	logger.Info("Defaulting for Pod", "name", pod.GetName())
 
-	// No logic here as we handle it in the Handle method.
-	// No default behavior should be set for pods!
+	log := log.FromContext(ctx).WithName("pod-defaulter")
+	log.Info("Pod webhook called", "pod", pod.Name, "namespace", pod.Namespace)
+
+	// Check if we should manage this pod
+	singleton, isManaged, err := r.shouldManagePod(ctx, pod)
+	if err != nil {
+		log.Error(err, "Failed to determine if pod should be managed")
+		return nil // Pod creation/update should go through even if mutation faild by our operator
+	}
+
+	if !isManaged {
+		log.Info("Pod not managed by StatefulSingleton", "pod", pod.Name)
+		return nil
+	}
+
+	log.Info("Mutating pod for StatefulSingleton", "pod", pod.Name, "singleton", singleton.Name)
+
+	// Apply webhook pod mutation
+	if err := r.mutatePodSpec(pod, singleton); err != nil {
+		log.Error(err, "Failed to mutate pod spec")
+		return nil // Pod creation/update should go through even if mutation faild by our operator
+	}
+
 	return nil
 }
 
-// PodMutator mutates Pods
-type PodMutator struct {
-	Client  client.Client
-	decoder admission.Decoder
-}
-
 // shouldManagePod determines if a pod should be managed by our controller
-func (m *PodMutator) shouldManagePod(ctx context.Context, pod *corev1.Pod) (*appsv1.StatefulSingleton, bool, error) {
-	logger := log.FromContext(ctx).WithName("pod-webhook")
+func (r *PodDefaulter) shouldManagePod(ctx context.Context, pod *corev1.Pod) (*appsv1.StatefulSingleton, bool, error) {
+	log := log.FromContext(ctx)
 
 	// List all StatefulSingleton resources in this namespace
 	var singletonList appsv1.StatefulSingletonList
-	if err := m.Client.List(ctx, &singletonList, client.InNamespace(pod.Namespace)); err != nil {
+	if err := r.Client.List(ctx, &singletonList, client.InNamespace(pod.Namespace)); err != nil {
 		return nil, false, err
 	}
 
-	// Check if pod labels match any StatefulSingleton selectors
+	// Check if pod matches any StatefulSingleton selectors
 	for _, singleton := range singletonList.Items {
 		selector, err := metav1.LabelSelectorAsSelector(&singleton.Spec.Selector)
 		if err != nil {
-			logger.Error(err, "Failed to convert label selector", "singleton", singleton.Name)
+			log.Error(err, "Failed to convert label selector", "singleton", singleton.Name)
 			continue
 		}
 
 		if selector.Matches(labels.Set(pod.Labels)) {
-			logger.Info("Pod matches StatefulSingleton selector",
+			log.Info("Pod matches StatefulSingleton selector",
 				"pod", pod.Name, "singleton", singleton.Name)
 			return &singleton, true, nil
 		}
@@ -94,28 +107,36 @@ func (m *PodMutator) shouldManagePod(ctx context.Context, pod *corev1.Pod) (*app
 }
 
 // mutatePodSpec modifies the pod spec to include our customizations
-func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSingleton) error {
+func (r *PodDefaulter) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSingleton) error {
 	// Add readiness gate
 	if pod.Spec.ReadinessGates == nil {
 		pod.Spec.ReadinessGates = []corev1.PodReadinessGate{}
 	}
 
-	// Check if readiness gate already exists, if not add it
-	if !podutil.HasSingletonReadinessGate(pod) {
+	// Check if our readiness gate already exists (meaning a reconcile happand for the pod)
+	readinessGateExists := false
+	for _, gate := range pod.Spec.ReadinessGates {
+		if gate.ConditionType == "apps.statefulsingleton.com/singleton-ready" {
+			readinessGateExists = true
+			break
+		}
+	}
+
+	if !readinessGateExists {
 		pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{
-			ConditionType: "statefulsingleton.com/singleton-ready",
+			ConditionType: "apps.statefulsingleton.com/singleton-ready",
 		})
 	}
 
-	// Set termination grace period if specified in the StatefulSingleton. Default set to 30s.
+	// Set termination grace period if specified
 	if singleton != nil && singleton.Spec.TerminationGracePeriod > 0 {
 		gracePeriod := int64(singleton.Spec.TerminationGracePeriod)
 
-		// Checking if the pod has its own grace period - if so we should respect it
+		// Should original grace period be respected
 		if singleton.Spec.RespectPodGracePeriod &&
 			pod.Spec.TerminationGracePeriodSeconds != nil &&
 			*pod.Spec.TerminationGracePeriodSeconds > gracePeriod {
-			// Keep pod's grace period as it's longer than suggested by StatefulSingleton
+			// Keep pod's grace period as it's longer
 		} else {
 			// Use the singleton's grace period
 			pod.Spec.TerminationGracePeriodSeconds = &gracePeriod
@@ -123,9 +144,29 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 	}
 
 	// Add volumes for signaling and wrapper scripts if they don't exist
+	r.addRequiredVolumes(pod)
+
+	// Modify containers
+	r.modifyContainers(pod)
+
+	// Add status sidecar if not already present
+	r.addStatusSidecar(pod)
+
+	// Add annotation to track that we've modified this pod
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["apps.statefulsingleton.com/statefulsingleton-managed"] = "true"
+
+	return nil
+}
+
+// addRequiredVolumes adds signal and warpper volumes required for signaling to start pod and replace original entrypoint (pod level)
+func (r *PodDefaulter) addRequiredVolumes(pod *corev1.Pod) {
 	signalVolumeExists := false
 	wrapperVolumeExists := false
 
+	// Checking if our control volumes exist
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Name == "signal-volume" {
 			signalVolumeExists = true
@@ -135,7 +176,7 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 		}
 	}
 
-	// Using emptydir for minimal creation time
+	// Adding signal volume for runtime control
 	if !signalVolumeExists {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 			Name: "signal-volume",
@@ -145,7 +186,7 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 		})
 	}
 
-	// Wrapper script is a configmap created in the pods namespace when pod is controlled by StatefulSingleton
+	// Adding our wrapper script
 	if !wrapperVolumeExists {
 		defaultMode := int32(0755)
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
@@ -160,8 +201,10 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 			},
 		})
 	}
+}
 
-	// For each container, always capture entrypoint information for proper handling
+// modifyContainers replaces original entrypoint with wrapper in main container and adds status-sidecar to control signal and start
+func (r *PodDefaulter) modifyContainers(pod *corev1.Pod) {
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
 
@@ -170,169 +213,116 @@ func (m *PodMutator) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSi
 			continue
 		}
 
-		// Always capture original entrypoint information, even if empty
-		// This allows our wrapper script to distinguish between:
-		// 1. Explicitly defined commands/args in pod spec
-		// 2. Containers that rely on Dockerfile ENTRYPOINT/CMD (both will be empty arrays)
+		// Capture original entrypoint
 		originalEntrypoint := map[string]interface{}{
-			"command": container.Command, // May be empty array []
-			"args":    container.Args,    // May be empty array []
-			"image":   container.Image,   // Include for reference/debugging
+			"command": container.Command,
+			"args":    container.Args,
+			"image":   container.Image,
 		}
 
 		entrypointJSON, _ := json.Marshal(originalEntrypoint)
 
-		// Add our wrapper and signal volume mounts if they don't exist
-		signalMountExists := false
-		wrapperMountExists := false
+		// Add volume mounts
+		r.addVolumesToContainer(container)
 
-		for _, mount := range container.VolumeMounts {
-			if mount.Name == "signal-volume" {
-				signalMountExists = true
-			}
-			if mount.Name == "wrapper-scripts" {
-				wrapperMountExists = true
-			}
-		}
-
-		if !signalMountExists {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "signal-volume",
-				MountPath: "/var/run/signal",
-			})
-		}
-
-		if !wrapperMountExists {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "wrapper-scripts",
-				MountPath: "/opt/wrapper",
-			})
-		}
-
-		// Always set the environment variable with captured entrypoint information
-		entrypointEnvExists := false
-		for j, env := range container.Env {
-			if env.Name == "ORIGINAL_ENTRYPOINT" {
-				// Update existing environment variable
-				container.Env[j].Value = string(entrypointJSON)
-				entrypointEnvExists = true
-				break
-			}
-		}
-
-		if !entrypointEnvExists {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  "ORIGINAL_ENTRYPOINT",
-				Value: string(entrypointJSON),
-			})
-		}
+		// Set environment variable with original entrypoint
+		r.setOriginalEntrypointEnv(container, string(entrypointJSON))
 
 		// Replace command with wrapper script
-		// This is safe because we've captured the original command/args above
 		container.Command = []string{"/opt/wrapper/entrypoint-wrapper.sh"}
-		container.Args = []string{} // Clear args since wrapper will handle them
+		container.Args = []string{}
+	}
+}
+
+// addVolumesToContainer adds signal and warpper volumes required for signaling to start pod and replace original entrypoint (container level)
+func (r *PodDefaulter) addVolumesToContainer(container *corev1.Container) {
+	signalMountExists := false
+	wrapperMountExists := false
+
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "signal-volume" {
+			signalMountExists = true
+		}
+		if mount.Name == "wrapper-scripts" {
+			wrapperMountExists = true
+		}
 	}
 
-	// Add status sidecar if not already present
-	sidecarExists := false
-	for _, container := range pod.Spec.Containers {
-		if container.Name == "status-sidecar" {
-			sidecarExists = true
+	if !signalMountExists {
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      "signal-volume",
+			MountPath: "/var/run/signal",
+		})
+	}
+
+	if !wrapperMountExists {
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      "wrapper-scripts",
+			MountPath: "/opt/wrapper",
+		})
+	}
+}
+
+// setOriginalEntrypointEnv registers the orignal entrypoint as an environment variable for future reference (upon starting the containers original function)
+func (r *PodDefaulter) setOriginalEntrypointEnv(container *corev1.Container, entrypointJSON string) {
+	entrypointEnvExists := false
+	for j, env := range container.Env {
+		if env.Name == "ORIGINAL_ENTRYPOINT" {
+			container.Env[j].Value = entrypointJSON
+			entrypointEnvExists = true
 			break
 		}
 	}
 
-	// Creating sidecar container to handle signal.
-	// Sidecar container is our way for the operator to communicate with pods without modifying the main application
-	if !sidecarExists {
-		statusSidecar := corev1.Container{
-			Name:    "status-sidecar",
-			Image:   "registry.access.redhat.com/ubi8/ubi-minimal:latest",
-			Command: []string{"/bin/sh", "-c"},
-			Args:    []string{"mkdir -p /var/run/signal && while true; do sleep 30; done"},
-			VolumeMounts: []corev1.VolumeMount{
-				{
-					Name:      "signal-volume",
-					MountPath: "/var/run/signal",
-				},
-			},
-			// Arbitrary low resources for sidecar container, mininmal requirements for above signal script.
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("10m"),
-					corev1.ResourceMemory: resource.MustParse("32Mi"),
-				},
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("20m"),
-					corev1.ResourceMemory: resource.MustParse("64Mi"),
-				},
-			},
+	if !entrypointEnvExists {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "ORIGINAL_ENTRYPOINT",
+			Value: entrypointJSON,
+		})
+	}
+}
+
+// addStatusSidecar adds the status-sidecar container to control signal and start
+func (r *PodDefaulter) addStatusSidecar(pod *corev1.Pod) {
+	// Check if sidecar already exists
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "status-sidecar" {
+			return
 		}
-		pod.Spec.Containers = append(pod.Spec.Containers, statusSidecar)
 	}
 
-	// Add annotation to track that we've modified this pod, for controller tracking
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
+	statusSidecar := corev1.Container{
+		Name:    "status-sidecar",
+		Image:   "registry.access.redhat.com/ubi8/ubi-minimal:latest",
+		Command: []string{"/bin/sh", "-c"},
+		Args:    []string{"mkdir -p /var/run/signal && while true; do sleep " + signalStartRequeueTime + "; done"}, // Running start signal validataion
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "signal-volume",
+				MountPath: "/var/run/signal",
+			},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("10m"),
+				corev1.ResourceMemory: resource.MustParse("32Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("20m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+		},
 	}
-	pod.Annotations["openshift.yourdomain.com/statefulsingleton-managed"] = "true"
-
-	return nil
-}
-
-// Handle implements admission.Handler
-func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	logger := log.FromContext(ctx).WithName("pod-webhook")
-
-	// Decode the Pod
-	pod := &corev1.Pod{}
-	err := m.decoder.DecodeRaw(req.Object, pod)
-	if err != nil {
-		logger.Error(err, "Failed to decode pod")
-		return admission.Errored(http.StatusBadRequest, err)
-	}
-
-	// Check if this pod should be managed by our controller
-	singleton, managed, err := m.shouldManagePod(ctx, pod)
-	if err != nil {
-		logger.Error(err, "Failed to determine if pod should be managed")
-		return admission.Allowed("Error checking management status")
-	}
-
-	if !managed {
-		return admission.Allowed("Pod not managed by StatefulSingleton")
-	}
-
-	logger.Info("Mutating pod", "namespace", pod.Namespace, "name", pod.Name)
-
-	// Apply modifications to the pod spec
-	if err := m.mutatePodSpec(pod, singleton); err != nil {
-		logger.Error(err, "Failed to mutate pod spec")
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-
-	// Create the patch
-	marshaledPod, err := json.Marshal(pod)
-	if err != nil {
-		logger.Error(err, "Failed to marshal pod")
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
-}
-
-// InjectDecoder injects the decoder.
-// Called automatically by the controller-runtime framework during webhook setup, before the webhook starts handling requests
-func (m *PodMutator) InjectDecoder(d admission.Decoder) error {
-	m.decoder = d
-	return nil
+	pod.Spec.Containers = append(pod.Spec.Containers, statusSidecar)
 }
 
 // SetupWithManager sets up the webhook with the Manager
-func (m *PodMutator) SetupWithManager(mgr ctrl.Manager) error {
-	m.Client = mgr.GetClient()
+func SetupStatefulSingletonWithManager(mgr ctrl.Manager) error {
+
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(&corev1.Pod{}).
-		WithDefaulter(m).
+		WithDefaulter(&PodDefaulter{
+			Client: mgr.GetClient(),
+		}).
 		Complete()
 }

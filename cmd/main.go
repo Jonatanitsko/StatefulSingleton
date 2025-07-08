@@ -213,9 +213,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err = (&webhookcorev1.PodMutator{
-			Client: mgr.GetClient(),
-		}).SetupWithManager(mgr); err != nil {
+		if err = webhookcorev1.SetupStatefulSingletonWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
 			os.Exit(1)
 		}
