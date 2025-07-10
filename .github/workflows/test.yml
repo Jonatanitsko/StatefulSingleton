@@ -2,22 +2,60 @@ name: Tests
 
 on:
   push:
+    branches: [ master ]
   pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: Run on Ubuntu
+    name: Test on Go ${{ matrix.go-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        go-version: ["1.23", "1.24"]
+      fail-fast: false
+
     steps:
-      - name: Clone the code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Setup Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: go.sum
 
-      - name: Running Tests
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run tests
         run: |
           go mod tidy
           make test
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./cover.out
+          flags: unittests
+          name: codecov-umbrella
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

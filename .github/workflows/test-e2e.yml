@@ -2,34 +2,93 @@ name: E2E Tests
 
 on:
   push:
+    branches: [ master ]
   pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
 
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    name: E2E Tests on Go ${{ matrix.go-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        go-version: ["1.23", "1.24"]
+      fail-fast: false
+    
     steps:
-      - name: Clone the code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Setup Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: go.sum
 
-      - name: Install the latest version of kind
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
+
+      - name: Install Kind
+        uses: helm/kind-action@v1
+        with:
+          version: v0.25.0
+          cluster_name: statefulsingleton-e2e-${{ matrix.go-version }}
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+            - role: control-plane
+              extraPortMappings:
+              - containerPort: 9443
+                hostPort: 9443
+                protocol: TCP
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build operator image
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          make docker-build IMG=statefulsingleton:e2e-tests
+          kind load docker-image statefulsingleton:e2e-tests --name statefulsingleton-e2e-${{ matrix.go-version }}
 
-      - name: Verify kind installation
-        run: kind version
+      - name: Install CRDs
+        run: make install
 
-      - name: Create kind cluster
-        run: kind create cluster
-
-      - name: Running Test e2e
+      - name: Deploy operator
         run: |
-          go mod tidy
+          make deploy IMG=statefulsingleton:e2e-tests
+          kubectl wait --for=condition=available --timeout=300s deployment/statefulsingleton-controller-manager -n statefulsingleton-system
+
+      - name: Run E2E tests
+        run: |
+          export KUBECONFIG="$(kind get kubeconfig-path --name statefulsingleton-e2e-${{ matrix.go-version }} || echo ~/.kube/config)"
           make test-e2e
+        env:
+          ENABLE_WEBHOOKS: "true"
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "Operator logs"
+          kubectl logs -n statefulsingleton-system deployment/statefulsingleton-controller-manager --tail=100 || true
+          echo "All statefulsingleton related posts"
+          kubectl get pods -n statefulsingleton-system -o wide || true
+          echo "E2E test namespace"
+          kubectl get all -n e2e-test-statefulsingleton || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kind delete cluster --name statefulsingleton-e2e-${{ matrix.go-version }} || true
