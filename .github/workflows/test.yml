@@ -49,7 +49,7 @@ jobs:
       - name: Run tests
         run: |
           go mod tidy
-          make test
+          go test -v -cover ./... 2>&1 | tee gotest.log
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4

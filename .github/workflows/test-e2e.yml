@@ -67,7 +67,7 @@ jobs:
 
       - name: Build operator image
         run: |
-          make docker-build IMG=statefulsingleton:e2e-tests
+          make docker-build IMG=statefulsingleton:e2e-tests CONTAINER_TOOL=docker
           kind load docker-image statefulsingleton:e2e-tests --name statefulsingleton-e2e-${{ matrix.go-version }}
 
       - name: Install CRDs
@@ -76,8 +76,8 @@ jobs:
       - name: Deploy operator
         run: |
           make deploy IMG=statefulsingleton:e2e-tests
-          kubectl wait --for=condition=available --timeout=300s deployment/statefulsingleton-controller-manager -n statefulsingleton-system
-
+          kubectl wait --for=condition=available --timeout=300s deployment/stateful-singleton-controller-manager -n stateful-singleton-system
+ 
       - name: Run E2E tests
         run: |
           export KUBECONFIG="$(kind get kubeconfig-path --name statefulsingleton-e2e-${{ matrix.go-version }} || echo ~/.kube/config)"
@@ -89,9 +89,9 @@ jobs:
         if: failure()
         run: |
           echo "Operator logs"
-          kubectl logs -n statefulsingleton-system deployment/statefulsingleton-controller-manager --tail=100 || true
+          kubectl logs -n stateful-singleton-system deployment/stateful-singleton-controller-manager --tail=100 || true
           echo "All statefulsingleton related posts"
-          kubectl get pods -n statefulsingleton-system -o wide || true
+          kubectl get pods -n stateful-singleton-system -o wide || true
           echo "E2E test namespace"
           kubectl get all -n e2e-test-statefulsingleton || true
 
