@@ -13,22 +13,18 @@ permissions:
 
 jobs:
   lint:
-    name: Lint on Go ${{ matrix.go-version }}
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      matrix:
-        go-version: ["1.23", "1.24"]
-      fail-fast: false
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go ${{ matrix.go-version }}
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.24"
           cache-dependency-path: go.sum
 
       - name: Cache Go modules
@@ -37,15 +33,15 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.24-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-1.24-
             ${{ runner.os }}-go-
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.63.4
+          version: latest
           args: --timeout=5m
           skip-cache: false
           skip-pkg-cache: false
