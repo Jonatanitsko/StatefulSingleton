@@ -31,6 +31,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -82,15 +83,20 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	// Create test environment with webhook support
+
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: false,
-
-		// Enable webhook testing
+		
+		// Enable webhook testing with proper configuration
+		// Note: envtest will automatically patch the webhook manifests to use the local webhook server
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
 			Paths: []string{filepath.Join("..", "..", "..", "config", "webhook")},
 		},
 	}
+
+	// Set environment variable to enable webhooks
+	os.Setenv("ENABLE_WEBHOOKS", "true")
 
 	// Retrieve the first found binary directory to allow running tests from IDEs
 	if getFirstFoundEnvTestBinaryDir() != "" {
@@ -122,9 +128,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	// Register our webhook with the manager
-	err = (&PodMutator{
-		Client: mgr.GetClient(),
-	}).SetupWithManager(mgr)
+	err = SetupStatefulSingletonWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:webhook
@@ -147,6 +151,14 @@ var _ = BeforeSuite(func() {
 
 		return conn.Close()
 	}).Should(Succeed())
+
+	// The webhook configuration should now be automatically installed by envtest
+	fmt.Printf("✅ Webhook server ready at %s\n", addrPort)
+
+	// For envtest, we need to manually configure the webhook since service-based config doesn't work
+	// The webhook should be accessible at the localhost address provided by envtest
+
+
 })
 
 // AfterSuite runs once after all webhook tests
@@ -180,6 +192,7 @@ func getFirstFoundEnvTestBinaryDir() string {
 	return ""
 }
 
+
 // Helper function to create a test namespace
 func createTestNamespace(name string) *corev1.Namespace {
 	ns := &corev1.Namespace{}
@@ -204,9 +217,10 @@ func createBasicStatefulSingleton(name, namespace string, selector map[string]st
 
 // Helper function to create a basic pod spec for testing webhook mutations
 func createBasicPodSpec(name, namespace string, labels map[string]string) *corev1.Pod {
+	randPodName := name + rand.String(6)
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      randPodName,
 			Namespace: namespace,
 			Labels:    labels,
 		},
