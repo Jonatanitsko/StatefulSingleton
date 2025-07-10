@@ -67,7 +67,7 @@ jobs:
 
       - name: Build operator image
         run: |
-          make docker-build IMG=statefulsingleton:e2e-tests
+          make docker-build IMG=statefulsingleton:e2e-tests CONTAINER_TOOL=docker
           kind load docker-image statefulsingleton:e2e-tests --name statefulsingleton-e2e-${{ matrix.go-version }}
 
       - name: Install CRDs
