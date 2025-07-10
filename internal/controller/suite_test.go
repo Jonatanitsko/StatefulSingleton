@@ -336,17 +336,3 @@ func createTestPod(name string, namespace string, labels map[string]string, arti
 
 	return pod
 }
-
-// Helper function to eventually check a condition with proper timeout
-func eventuallyWithTimeout(check func() error, timeout time.Duration) {
-	Eventually(check, timeout, 100*time.Millisecond).Should(Succeed())
-}
-
-// Helper function to start the manager in a goroutine for tests that need it
-func startTestManager() {
-	go func() {
-		defer GinkgoRecover()
-		err := testMgr.Start(ctx)
-		Expect(err).ToNot(HaveOccurred())
-	}()
-}

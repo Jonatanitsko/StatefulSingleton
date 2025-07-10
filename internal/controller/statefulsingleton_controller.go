@@ -40,6 +40,10 @@ import (
 	"github.com/Jonatanitsko/StatefulSingleton.git/internal/podutil"
 )
 
+const (
+	phaseTransitioning = "Transitioning"
+)
+
 // StatefulSingletonReconciler reconciles a StatefulSingleton object
 type StatefulSingletonReconciler struct {
 	client.Client
@@ -47,14 +51,14 @@ type StatefulSingletonReconciler struct {
 	Recorder record.EventRecorder
 }
 
-//+kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/finalizers,verbs=update
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
-//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile handles StatefulSingleton resources
 func (r *StatefulSingletonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -169,7 +173,7 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 	logger.Info("Handling pod transition", "oldPod", oldPod.Name, "newPod", newPod.Name)
 
 	// Check if transition is already in progress
-	isTransitioning := singleton.Status.Phase == "Transitioning"
+	isTransitioning := singleton.Status.Phase == phaseTransitioning
 	if isTransitioning && singleton.Status.TransitionTimestamp != nil {
 		// Calculate how long we've been transitioning
 		transitionDuration := time.Since(singleton.Status.TransitionTimestamp.Time)
@@ -230,7 +234,7 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 				}
 
 				// Update status
-				return r.updateStatus(ctx, singleton, oldPod.Name, "Transitioning",
+				return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
 					fmt.Sprintf("Respecting grace period: waiting for pod %s to terminate (%.1fs of %ds)",
 						oldPod.Name, terminatingDuration.Seconds(), gracePeriod))
 			}
@@ -246,7 +250,7 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		}
 
 		// Update status
-		return r.updateStatus(ctx, singleton, oldPod.Name, "Transitioning",
+		return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
 			fmt.Sprintf("Waiting for pod %s to completely terminate",
 				oldPod.Name))
 	}
@@ -514,7 +518,7 @@ func (r *StatefulSingletonReconciler) updateStatus(
 		// No changes needed
 
 		// Determine requeue interval based on state
-		if phase == "Transitioning" {
+		if phase == phaseTransitioning {
 			// During transitions, reconcile more frequently
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
@@ -530,7 +534,7 @@ func (r *StatefulSingletonReconciler) updateStatus(
 	singletonCopy.Status.Message = message
 
 	// Set transition timestamp if we're entering transitioning phase
-	if phase == "Transitioning" && singleton.Status.Phase != "Transitioning" {
+	if phase == phaseTransitioning && singleton.Status.Phase != phaseTransitioning {
 		now := metav1.Now()
 		singletonCopy.Status.TransitionTimestamp = &now
 	}
@@ -541,7 +545,7 @@ func (r *StatefulSingletonReconciler) updateStatus(
 	}
 
 	// Determine requeue interval based on state
-	if phase == "Transitioning" {
+	if phase == phaseTransitioning {
 		// During transitions, reconcile more frequently
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
@@ -552,7 +556,7 @@ func (r *StatefulSingletonReconciler) updateStatus(
 func (r *StatefulSingletonReconciler) findObjectsForPod(ctx context.Context, pod client.Object) []reconcile.Request {
 	// List all StatefulSingleton resources in the pod's namespace
 	var singletonList appsv1.StatefulSingletonList
-	err := r.List(context.Background(), &singletonList,
+	err := r.List(ctx, &singletonList,
 		client.InNamespace(pod.GetNamespace()))
 	if err != nil {
 		return nil

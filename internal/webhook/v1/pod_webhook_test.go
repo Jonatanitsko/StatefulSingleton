@@ -94,10 +94,10 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that required volumes were added
 			var signalVolume, wrapperVolume *corev1.Volume
 			for i := range pod.Spec.Volumes {
-				if pod.Spec.Volumes[i].Name == "signal-volume" {
+				if pod.Spec.Volumes[i].Name == signalVolumeName {
 					signalVolume = &pod.Spec.Volumes[i]
 				}
-				if pod.Spec.Volumes[i].Name == "wrapper-scripts" {
+				if pod.Spec.Volumes[i].Name == wrapperScriptsVolumeName {
 					wrapperVolume = &pod.Spec.Volumes[i]
 				}
 			}
@@ -112,7 +112,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that status sidecar was added
 			var sidecarContainer *corev1.Container
 			for i := range pod.Spec.Containers {
-				if pod.Spec.Containers[i].Name == "status-sidecar" {
+				if pod.Spec.Containers[i].Name == statusSidecarContainerName {
 					sidecarContainer = &pod.Spec.Containers[i]
 					break
 				}
@@ -143,10 +143,10 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that required volumes were added
 			var signalVolume, wrapperVolume *corev1.Volume
 			for i := range pod.Spec.Volumes {
-				if pod.Spec.Volumes[i].Name == "signal-volume" {
+				if pod.Spec.Volumes[i].Name == signalVolumeName {
 					signalVolume = &pod.Spec.Volumes[i]
 				}
-				if pod.Spec.Volumes[i].Name == "wrapper-scripts" {
+				if pod.Spec.Volumes[i].Name == wrapperScriptsVolumeName {
 					wrapperVolume = &pod.Spec.Volumes[i]
 				}
 			}
@@ -161,7 +161,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that status sidecar was added
 			var sidecarContainer *corev1.Container
 			for i := range pod.Spec.Containers {
-				if pod.Spec.Containers[i].Name == "status-sidecar" {
+				if pod.Spec.Containers[i].Name == statusSidecarContainerName {
 					sidecarContainer = &pod.Spec.Containers[i]
 					break
 				}
@@ -173,7 +173,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Verify sidecar has the signal volume mount
 			var signalMount *corev1.VolumeMount
 			for i := range sidecarContainer.VolumeMounts {
-				if sidecarContainer.VolumeMounts[i].Name == "signal-volume" {
+				if sidecarContainer.VolumeMounts[i].Name == signalVolumeName {
 					signalMount = &sidecarContainer.VolumeMounts[i]
 					break
 				}
@@ -205,12 +205,12 @@ var _ = Describe("Pod Webhook", func() {
 			// The main container should now use the wrapper script
 			mainContainer := &pod.Spec.Containers[0]
 			Expect(mainContainer.Command).To(Equal([]string{"/opt/wrapper/entrypoint-wrapper.sh"}))
-			Expect(mainContainer.Args).To(HaveLen(0), "Args should be cleared since wrapper handles them")
+			Expect(mainContainer.Args).To(BeEmpty(), "Args should be cleared since wrapper handles them")
 
 			// Check that original entrypoint was captured in environment variable
 			var originalEntrypointEnv *corev1.EnvVar
 			for i := range mainContainer.Env {
-				if mainContainer.Env[i].Name == "ORIGINAL_ENTRYPOINT" {
+				if mainContainer.Env[i].Name == originalEntrypointEnvVar {
 					originalEntrypointEnv = &mainContainer.Env[i]
 					break
 				}
@@ -226,14 +226,14 @@ var _ = Describe("Pod Webhook", func() {
 			// Convert command and args back for comparison
 			capturedCommand, exists := capturedEntrypoint["command"].([]any)
 			Expect(exists).To(BeTrue(), "command should be present")
-			Expect(len(capturedCommand)).To(Equal(len(originalCommand)))
+			Expect(capturedCommand).To(HaveLen(len(originalCommand)))
 			for i, cmd := range originalCommand {
 				Expect(capturedCommand[i].(string)).To(Equal(cmd))
 			}
 
 			capturedArgs, exists := capturedEntrypoint["args"].([]any)
 			Expect(exists).To(BeTrue(), "args should be present")
-			Expect(len(capturedArgs)).To(Equal(len(originalArgs)))
+			Expect(capturedArgs).To(HaveLen(len(originalArgs)))
 			for i, arg := range originalArgs {
 				Expect(capturedArgs[i].(string)).To(Equal(arg))
 			}
@@ -241,10 +241,10 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that volume mounts were added to main container
 			var signalMount, wrapperMount bool
 			for _, mount := range mainContainer.VolumeMounts {
-				if mount.Name == "signal-volume" && mount.MountPath == "/var/run/signal" {
+				if mount.Name == signalVolumeName && mount.MountPath == "/var/run/signal" {
 					signalMount = true
 				}
-				if mount.Name == "wrapper-scripts" && mount.MountPath == "/opt/wrapper" {
+				if mount.Name == wrapperScriptsVolumeName && mount.MountPath == "/opt/wrapper" {
 					wrapperMount = true
 				}
 			}
@@ -306,7 +306,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Find the sidecar container
 			var sidecar *corev1.Container
 			for i := range pod.Spec.Containers {
-				if pod.Spec.Containers[i].Name == "status-sidecar" {
+				if pod.Spec.Containers[i].Name == statusSidecarContainerName {
 					sidecar = &pod.Spec.Containers[i]
 					break
 				}
@@ -348,10 +348,10 @@ var _ = Describe("Pod Webhook", func() {
 				container := &pod.Spec.Containers[i]
 				var signalMount, wrapperMount bool
 				for _, mount := range container.VolumeMounts {
-					if mount.Name == "signal-volume" {
+					if mount.Name == signalVolumeName {
 						signalMount = true
 					}
-					if mount.Name == "wrapper-scripts" {
+					if mount.Name == wrapperScriptsVolumeName {
 						wrapperMount = true
 					}
 				}
@@ -361,7 +361,7 @@ var _ = Describe("Pod Webhook", func() {
 
 			// Should have status sidecar (total 3 containers)
 			Expect(pod.Spec.Containers).To(HaveLen(3))
-			Expect(pod.Spec.Containers[2].Name).To(Equal("status-sidecar"))
+			Expect(pod.Spec.Containers[2].Name).To(Equal(statusSidecarContainerName))
 		})
 
 		It("should handle existing volume mounts in containers", func() {
@@ -375,7 +375,7 @@ var _ = Describe("Pod Webhook", func() {
 					MountPath: "/existing",
 				},
 				{
-					Name:      "signal-volume", // Same name as webhook volume
+					Name:      signalVolumeName, // Same name as webhook volume
 					MountPath: "/custom/signal/path",
 				},
 			}
@@ -395,10 +395,10 @@ var _ = Describe("Pod Webhook", func() {
 				switch mount.Name {
 				case "existing-mount":
 					existingMount = true
-				case "signal-volume":
+				case signalVolumeName:
 					signalMount = true
 					signalMountPath = mount.MountPath
-				case "wrapper-scripts":
+				case wrapperScriptsVolumeName:
 					wrapperMount = true
 				}
 			}
@@ -416,7 +416,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Add existing env vars including conflicting name
 			pod.Spec.Containers[0].Env = []corev1.EnvVar{
 				{Name: "EXISTING_VAR", Value: "value1"},
-				{Name: "ORIGINAL_ENTRYPOINT", Value: "should-be-overwritten"},
+				{Name: originalEntrypointEnvVar, Value: "should-be-overwritten"},
 			}
 
 			By("calling webhook logic directly")
@@ -432,7 +432,7 @@ var _ = Describe("Pod Webhook", func() {
 				switch container.Env[i].Name {
 				case "EXISTING_VAR":
 					existingVar = &container.Env[i]
-				case "ORIGINAL_ENTRYPOINT":
+				case originalEntrypointEnvVar:
 					originalEntrypoint = &container.Env[i]
 				}
 			}
@@ -470,17 +470,17 @@ var _ = Describe("Pod Webhook", func() {
 
 			By("verifying the pod was NOT modified by the webhook")
 			// Should not have readiness gates
-			Expect(pod.Spec.ReadinessGates).To(HaveLen(0))
+			Expect(pod.Spec.ReadinessGates).To(BeEmpty())
 
 			// Should not have our volumes
 			for _, volume := range pod.Spec.Volumes {
-				Expect(volume.Name).NotTo(Equal("signal-volume"))
-				Expect(volume.Name).NotTo(Equal("wrapper-scripts"))
+				Expect(volume.Name).NotTo(Equal(signalVolumeName))
+				Expect(volume.Name).NotTo(Equal(wrapperScriptsVolumeName))
 			}
 
 			// Should not have sidecar container
 			for _, container := range pod.Spec.Containers {
-				Expect(container.Name).NotTo(Equal("status-sidecar"))
+				Expect(container.Name).NotTo(Equal(statusSidecarContainerName))
 			}
 
 			// Should not have our annotation
@@ -528,7 +528,7 @@ var _ = Describe("Pod Webhook", func() {
 
 			By("verifying pod was not modified")
 			// Should not have readiness gates since labels don't match
-			Expect(pod.Spec.ReadinessGates).To(HaveLen(0))
+			Expect(pod.Spec.ReadinessGates).To(BeEmpty())
 			Expect(pod.Annotations).NotTo(HaveKey("apps.statefulsingleton.com/statefulsingleton-managed"))
 		})
 
@@ -596,7 +596,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Check that empty command/args were captured
 			var originalEntrypointEnv *corev1.EnvVar
 			for _, env := range pod.Spec.Containers[0].Env {
-				if env.Name == "ORIGINAL_ENTRYPOINT" {
+				if env.Name == originalEntrypointEnvVar {
 					originalEntrypointEnv = &env
 					break
 				}
@@ -620,7 +620,7 @@ var _ = Describe("Pod Webhook", func() {
 
 			// Add an existing sidecar
 			existingSidecar := corev1.Container{
-				Name:  "status-sidecar",
+				Name:  statusSidecarContainerName,
 				Image: "custom-sidecar:latest",
 			}
 			pod.Spec.Containers = append(pod.Spec.Containers, existingSidecar)
@@ -637,7 +637,7 @@ var _ = Describe("Pod Webhook", func() {
 			// Find the sidecar
 			var sidecar *corev1.Container
 			for i := range pod.Spec.Containers {
-				if pod.Spec.Containers[i].Name == "status-sidecar" {
+				if pod.Spec.Containers[i].Name == statusSidecarContainerName {
 					sidecar = &pod.Spec.Containers[i]
 					break
 				}
@@ -653,7 +653,7 @@ var _ = Describe("Pod Webhook", func() {
 
 			// Add an existing volume with the same name
 			existingVolume := corev1.Volume{
-				Name: "signal-volume",
+				Name: signalVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					HostPath: &corev1.HostPathVolumeSource{
 						Path: "/tmp/existing",
@@ -672,7 +672,7 @@ var _ = Describe("Pod Webhook", func() {
 			var signalVolume *corev1.Volume
 			volumeCount := 0
 			for i := range pod.Spec.Volumes {
-				if pod.Spec.Volumes[i].Name == "signal-volume" {
+				if pod.Spec.Volumes[i].Name == signalVolumeName {
 					signalVolume = &pod.Spec.Volumes[i]
 					volumeCount++
 				}

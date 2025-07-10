@@ -41,19 +41,26 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Install Kind
-        uses: helm/kind-action@v1
-        with:
-          version: v0.25.0
-          cluster_name: statefulsingleton-e2e-${{ matrix.go-version }}
-          config: |
-            kind: Cluster
-            apiVersion: kind.x-k8s.io/v1alpha4
-            nodes:
-            - role: control-plane
-              extraPortMappings:
-              - containerPort: 9443
-                hostPort: 9443
-                protocol: TCP
+        run: |
+          # Install Kind
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          
+          # Create Kind config file
+          cat <<EOF > kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+          - role: control-plane
+            extraPortMappings:
+            - containerPort: 9443
+              hostPort: 9443
+              protocol: TCP
+          EOF
+          
+          # Create cluster
+          kind create cluster --name statefulsingleton-e2e-${{ matrix.go-version }} --config kind-config.yaml
 
       - name: Download dependencies
         run: go mod download

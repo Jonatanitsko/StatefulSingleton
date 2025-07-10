@@ -41,9 +41,15 @@ type PodDefaulter struct {
 
 var _ webhook.CustomDefaulter = &PodDefaulter{}
 
-const signalStartRequeueTime string = "10"
+const (
+	signalStartRequeueTime     = "10"
+	originalEntrypointEnvVar   = "ORIGINAL_ENTRYPOINT"
+	signalVolumeName           = "signal-volume"
+	wrapperScriptsVolumeName   = "wrapper-scripts"
+	statusSidecarContainerName = "status-sidecar"
+)
 
-//+kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
 
 // Default implements the defaulting logic for Pods
 func (r *PodDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -107,7 +113,7 @@ func (r *PodDefaulter) shouldManagePod(ctx context.Context, pod *corev1.Pod) (*a
 }
 
 // mutatePodSpec modifies the pod spec to include our customizations
-func (r *PodDefaulter) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSingleton) error {
+func (r *PodDefaulter) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.StatefulSingleton) error { //nolint:unparam
 	// Add readiness gate
 	if pod.Spec.ReadinessGates == nil {
 		pod.Spec.ReadinessGates = []corev1.PodReadinessGate{}
@@ -168,10 +174,10 @@ func (r *PodDefaulter) addRequiredVolumes(pod *corev1.Pod) {
 
 	// Checking if our control volumes exist
 	for _, volume := range pod.Spec.Volumes {
-		if volume.Name == "signal-volume" {
+		if volume.Name == signalVolumeName {
 			signalVolumeExists = true
 		}
-		if volume.Name == "wrapper-scripts" {
+		if volume.Name == wrapperScriptsVolumeName {
 			wrapperVolumeExists = true
 		}
 	}
@@ -179,7 +185,7 @@ func (r *PodDefaulter) addRequiredVolumes(pod *corev1.Pod) {
 	// Adding signal volume for runtime control
 	if !signalVolumeExists {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: "signal-volume",
+			Name: signalVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
@@ -190,7 +196,7 @@ func (r *PodDefaulter) addRequiredVolumes(pod *corev1.Pod) {
 	if !wrapperVolumeExists {
 		defaultMode := int32(0755)
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: "wrapper-scripts",
+			Name: wrapperScriptsVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
@@ -209,7 +215,7 @@ func (r *PodDefaulter) modifyContainers(pod *corev1.Pod) {
 		container := &pod.Spec.Containers[i]
 
 		// Skip if this is our sidecar
-		if container.Name == "status-sidecar" {
+		if container.Name == statusSidecarContainerName {
 			continue
 		}
 
@@ -240,24 +246,24 @@ func (r *PodDefaulter) addVolumesToContainer(container *corev1.Container) {
 	wrapperMountExists := false
 
 	for _, mount := range container.VolumeMounts {
-		if mount.Name == "signal-volume" {
+		if mount.Name == signalVolumeName {
 			signalMountExists = true
 		}
-		if mount.Name == "wrapper-scripts" {
+		if mount.Name == wrapperScriptsVolumeName {
 			wrapperMountExists = true
 		}
 	}
 
 	if !signalMountExists {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      "signal-volume",
+			Name:      signalVolumeName,
 			MountPath: "/var/run/signal",
 		})
 	}
 
 	if !wrapperMountExists {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      "wrapper-scripts",
+			Name:      wrapperScriptsVolumeName,
 			MountPath: "/opt/wrapper",
 		})
 	}
@@ -267,7 +273,7 @@ func (r *PodDefaulter) addVolumesToContainer(container *corev1.Container) {
 func (r *PodDefaulter) setOriginalEntrypointEnv(container *corev1.Container, entrypointJSON string) {
 	entrypointEnvExists := false
 	for j, env := range container.Env {
-		if env.Name == "ORIGINAL_ENTRYPOINT" {
+		if env.Name == originalEntrypointEnvVar {
 			container.Env[j].Value = entrypointJSON
 			entrypointEnvExists = true
 			break
@@ -276,7 +282,7 @@ func (r *PodDefaulter) setOriginalEntrypointEnv(container *corev1.Container, ent
 
 	if !entrypointEnvExists {
 		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "ORIGINAL_ENTRYPOINT",
+			Name:  originalEntrypointEnvVar,
 			Value: entrypointJSON,
 		})
 	}
@@ -286,19 +292,19 @@ func (r *PodDefaulter) setOriginalEntrypointEnv(container *corev1.Container, ent
 func (r *PodDefaulter) addStatusSidecar(pod *corev1.Pod) {
 	// Check if sidecar already exists
 	for _, container := range pod.Spec.Containers {
-		if container.Name == "status-sidecar" {
+		if container.Name == statusSidecarContainerName {
 			return
 		}
 	}
 
 	statusSidecar := corev1.Container{
-		Name:    "status-sidecar",
+		Name:    statusSidecarContainerName,
 		Image:   "registry.access.redhat.com/ubi8/ubi-minimal:latest",
 		Command: []string{"/bin/sh", "-c"},
 		Args:    []string{"mkdir -p /var/run/signal && while true; do sleep " + signalStartRequeueTime + "; done"}, // Running start signal validataion
 		VolumeMounts: []corev1.VolumeMount{
 			{
-				Name:      "signal-volume",
+				Name:      signalVolumeName,
 				MountPath: "/var/run/signal",
 			},
 		},

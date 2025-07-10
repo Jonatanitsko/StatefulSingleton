@@ -87,7 +87,7 @@ var _ = BeforeSuite(func() {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: false,
-		
+
 		// Enable webhook testing with proper configuration
 		// Note: envtest will automatically patch the webhook manifests to use the local webhook server
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
@@ -96,7 +96,8 @@ var _ = BeforeSuite(func() {
 	}
 
 	// Set environment variable to enable webhooks
-	os.Setenv("ENABLE_WEBHOOKS", "true")
+	envErr := os.Setenv("ENABLE_WEBHOOKS", "true")
+	Expect(envErr).NotTo(HaveOccurred())
 
 	// Retrieve the first found binary directory to allow running tests from IDEs
 	if getFirstFoundEnvTestBinaryDir() != "" {
@@ -158,7 +159,6 @@ var _ = BeforeSuite(func() {
 	// For envtest, we need to manually configure the webhook since service-based config doesn't work
 	// The webhook should be accessible at the localhost address provided by envtest
 
-
 })
 
 // AfterSuite runs once after all webhook tests
@@ -192,7 +192,6 @@ func getFirstFoundEnvTestBinaryDir() string {
 	return ""
 }
 
-
 // Helper function to create a test namespace
 func createTestNamespace(name string) *corev1.Namespace {
 	ns := &corev1.Namespace{}
@@ -202,7 +201,7 @@ func createTestNamespace(name string) *corev1.Namespace {
 }
 
 // Helper function to create a basic StatefulSingleton resource for webhook testing
-func createBasicStatefulSingleton(name, namespace string, selector map[string]string) *appsv1.StatefulSingleton {
+func createBasicStatefulSingleton(name, namespace string, selector map[string]string) *appsv1.StatefulSingleton { //nolint:unparam
 	stss := &appsv1.StatefulSingleton{}
 	stss.Name = name
 	stss.Namespace = namespace

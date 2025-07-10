@@ -41,22 +41,6 @@ import (
 // "BeforeEach" runs before each "It" test
 // "AfterEach" runs after each "It" test
 
-func printStatefulSinleton(namespace string, statefulSingletonName string) {
-	namespacedName := types.NamespacedName{
-		Name:      statefulSingletonName,
-		Namespace: namespace,
-	}
-
-	singleton := &appsv1.StatefulSingleton{}
-	err := k8sClient.Get(ctx, namespacedName, singleton)
-
-	if err != nil {
-		fmt.Fprintf(GinkgoWriter, "An error occourd: %v\n", err)
-	}
-
-	fmt.Fprintf(GinkgoWriter, "Requested statefulSingleton: %v\n", singleton)
-}
-
 var _ = Describe("StatefulSingleton Controller", func() {
 	var (
 		testNamespace     string
@@ -248,7 +232,9 @@ var _ = Describe("StatefulSingleton Controller", func() {
 			// Wait for the old pod to be recognized as active
 			Eventually(func() string {
 				updatedSingleton := &appsv1.StatefulSingleton{}
-				k8sClient.Get(ctx, namespacedName, updatedSingleton)
+				if err := k8sClient.Get(ctx, namespacedName, updatedSingleton); err != nil {
+					return ""
+				}
 				return updatedSingleton.Status.ActivePod
 			}, 5*time.Second).Should(Equal(oldPod.Name))
 
@@ -270,7 +256,9 @@ var _ = Describe("StatefulSingleton Controller", func() {
 			By("verifying the controller enters transitioning state")
 			Eventually(func() string {
 				updatedSingleton := &appsv1.StatefulSingleton{}
-				k8sClient.Get(ctx, namespacedName, updatedSingleton)
+				if err := k8sClient.Get(ctx, namespacedName, updatedSingleton); err != nil {
+					return ""
+				}
 				return updatedSingleton.Status.Phase
 			}, 5*time.Second).Should(Equal("Transitioning"))
 
@@ -288,14 +276,18 @@ var _ = Describe("StatefulSingleton Controller", func() {
 			By("verifying the new pod becomes active")
 			Eventually(func() string {
 				updatedSingleton := &appsv1.StatefulSingleton{}
-				k8sClient.Get(ctx, namespacedName, updatedSingleton)
+				if err := k8sClient.Get(ctx, namespacedName, updatedSingleton); err != nil {
+					return ""
+				}
 				return updatedSingleton.Status.ActivePod
 			}, 10*time.Second).Should(Equal(newPod.Name))
 
 			// And the phase should return to Running
 			Eventually(func() string {
 				updatedSingleton := &appsv1.StatefulSingleton{}
-				k8sClient.Get(ctx, namespacedName, updatedSingleton)
+				if err := k8sClient.Get(ctx, namespacedName, updatedSingleton); err != nil {
+					return ""
+				}
 				return updatedSingleton.Status.Phase
 			}, 5*time.Second).Should(Equal("Running"))
 		})
@@ -429,7 +421,9 @@ var _ = Describe("StatefulSingleton Controller", func() {
 			// Verify old pod is active
 			Eventually(func() string {
 				updatedSingleton := &appsv1.StatefulSingleton{}
-				k8sClient.Get(ctx, namespacedName, updatedSingleton)
+				if err := k8sClient.Get(ctx, namespacedName, updatedSingleton); err != nil {
+					return ""
+				}
 				return updatedSingleton.Status.ActivePod
 			}, 5*time.Second).Should(Equal(oldPod.Name))
 
