@@ -73,7 +73,12 @@ jobs:
       - name: Build operator image
         run: |
           make docker-build IMG=statefulsingleton:e2e-tests CONTAINER_TOOL=docker
+          # Load image to all nodes in the cluster (default behavior should load to all nodes)
           kind load docker-image statefulsingleton:e2e-tests --name statefulsingleton-e2e-${{ matrix.go-version }}
+          # Verify image is loaded on all nodes
+          docker exec statefulsingleton-e2e-${{ matrix.go-version }}-control-plane crictl images | grep statefulsingleton || true
+          docker exec statefulsingleton-e2e-${{ matrix.go-version }}-worker crictl images | grep statefulsingleton || true
+          docker exec statefulsingleton-e2e-${{ matrix.go-version }}-worker2 crictl images | grep statefulsingleton || true
 
       - name: Install CRDs
         run: make install
