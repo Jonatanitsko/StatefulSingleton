@@ -53,10 +53,15 @@ jobs:
           apiVersion: kind.x-k8s.io/v1alpha4
           nodes:
           - role: control-plane
+            image: kindest/node:v1.33.1
             extraPortMappings:
             - containerPort: 9443
               hostPort: 9443
               protocol: TCP
+          - role: worker
+            image: kindest/node:v1.33.1
+          - role: worker
+            image: kindest/node:v1.33.1
           EOF
           
           # Create cluster
@@ -76,7 +81,7 @@ jobs:
       - name: Deploy operator
         run: |
           make deploy IMG=statefulsingleton:e2e-tests
-          kubectl wait --for=condition=available --timeout=300s deployment/stateful-singleton-controller-manager -n stateful-singleton-system
+          kubectl wait --for=condition=available --timeout=600s deployment/stateful-singleton-controller-manager -n stateful-singleton-system
  
       - name: Run E2E tests
         run: |
@@ -88,11 +93,18 @@ jobs:
       - name: Debug on failure
         if: failure()
         run: |
-          echo "Operator logs"
-          kubectl logs -n stateful-singleton-system deployment/stateful-singleton-controller-manager --tail=100 || true
-          echo "All statefulsingleton related posts"
+          echo "=== Cluster Status ==="
+          kubectl get nodes -o wide || true
+          kubectl get pods -A || true
+          echo "=== Operator Deployment ==="
+          kubectl get deployment -n stateful-singleton-system -o wide || true
+          kubectl describe deployment stateful-singleton-controller-manager -n stateful-singleton-system || true
+          echo "=== Operator Pods ==="
           kubectl get pods -n stateful-singleton-system -o wide || true
-          echo "E2E test namespace"
+          kubectl describe pods -n stateful-singleton-system || true
+          echo "=== Operator Logs ==="
+          kubectl logs -n stateful-singleton-system deployment/stateful-singleton-controller-manager --tail=100 || true
+          echo "=== E2E test namespace ==="
           kubectl get all -n e2e-test-statefulsingleton || true
 
       - name: Cleanup
