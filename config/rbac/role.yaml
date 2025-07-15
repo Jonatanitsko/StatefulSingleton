@@ -41,7 +41,7 @@ rules:
 - apiGroups:
   - apps.statefulsingleton.com
   resources:
-  - statefulsingleton
+  - statefulsingletons
   verbs:
   - create
   - delete
@@ -53,13 +53,13 @@ rules:
 - apiGroups:
   - apps.statefulsingleton.com
   resources:
-  - statefulsingleton/finalizers
+  - statefulsingletons/finalizers
   verbs:
   - update
 - apiGroups:
   - apps.statefulsingleton.com
   resources:
-  - statefulsingleton/status
+  - statefulsingletons/status
   verbs:
   - get
   - patch

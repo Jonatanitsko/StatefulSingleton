@@ -51,9 +51,9 @@ type StatefulSingletonReconciler struct {
 	Recorder record.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingleton/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingletons,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingletons/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.statefulsingleton.com,resources=statefulsingletons/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
