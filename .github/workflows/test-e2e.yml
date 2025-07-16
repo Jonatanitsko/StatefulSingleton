@@ -29,16 +29,21 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache-dependency-path: go.sum
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-            ${{ runner.os }}-go-
+      - name: Clear Go module and build cache
+        run: |
+          rm -rf ~/.cache/go-build
+          sudo rm -rf ~/go/pkg/mod
+
+      #- name: Cache Go modules
+      #  uses: actions/cache@v4
+      #  with:
+      #    path: |
+      #      ~/.cache/go-build
+      #      ~/go/pkg/mod
+      #    key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+      #    restore-keys: |
+      #      ${{ runner.os }}-go-${{ matrix.go-version }}-
+      #      ${{ runner.os }}-go-
 
       - name: Install Kind
         run: |
@@ -53,15 +58,24 @@ jobs:
           apiVersion: kind.x-k8s.io/v1alpha4
           nodes:
           - role: control-plane
-            image: kindest/node:v1.33.1
+            kubeadmConfigPatches:
+            - |
+              kind: InitConfiguration
+              nodeRegistration:
+                kubeletExtraArgs:
+                  node-labels: "ingress-ready=true"
             extraPortMappings:
+            - containerPort: 80
+              hostPort: 8080
+              protocol: TCP
+            - containerPort: 443
+              hostPort: 8443
+              protocol: TCP
             - containerPort: 9443
               hostPort: 9443
               protocol: TCP
           - role: worker
-            image: kindest/node:v1.33.1
           - role: worker
-            image: kindest/node:v1.33.1
           EOF
           
           # Create cluster
@@ -73,12 +87,10 @@ jobs:
       - name: Build operator image
         run: |
           make docker-build IMG=statefulsingleton:e2e-tests CONTAINER_TOOL=docker
-          # Load image to all nodes in the cluster (default behavior should load to all nodes)
+          # Load image into kind cluster
           kind load docker-image statefulsingleton:e2e-tests --name statefulsingleton-e2e-${{ matrix.go-version }}
-          # Verify image is loaded on all nodes
+          # Verify image is loaded
           docker exec statefulsingleton-e2e-${{ matrix.go-version }}-control-plane crictl images | grep statefulsingleton || true
-          docker exec statefulsingleton-e2e-${{ matrix.go-version }}-worker crictl images | grep statefulsingleton || true
-          docker exec statefulsingleton-e2e-${{ matrix.go-version }}-worker2 crictl images | grep statefulsingleton || true
 
       - name: Install CRDs
         run: make install
