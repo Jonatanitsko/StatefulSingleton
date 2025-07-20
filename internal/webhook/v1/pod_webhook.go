@@ -49,7 +49,7 @@ const (
 	statusSidecarContainerName = "status-sidecar"
 )
 
-// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
 
 // Default implements the defaulting logic for Pods
 func (r *PodDefaulter) Default(ctx context.Context, obj runtime.Object) error {

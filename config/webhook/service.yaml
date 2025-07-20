@@ -6,6 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: webhook-service
   namespace: system
+  annotations: {}
 spec:
   ports:
     - port: 443

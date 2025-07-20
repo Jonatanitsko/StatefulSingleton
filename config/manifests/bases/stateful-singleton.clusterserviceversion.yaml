@@ -1,0 +1,267 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "apps.statefulsingleton.com/v1",
+          "kind": "StatefulSingleton",
+          "metadata": {
+            "name": "example-singleton"
+          },
+          "spec": {
+            "selector": {
+              "matchLabels": {
+                "app": "my-app"
+              }
+            }
+          }
+        }
+      ]
+    capabilities: Basic Install
+    categories: Application Runtime
+    description: Manages controlled transitions for stateful singleton applications
+    # Platform compatibility annotations
+    features.operators.openshift.io/disconnected: "true"
+    features.operators.openshift.io/fips-compliant: "false"
+    features.operators.openshift.io/proxy-aware: "false"
+    features.operators.openshift.io/tls-profiles: "false"
+    features.operators.openshift.io/token-auth-aws: "false"
+    features.operators.openshift.io/token-auth-azure: "false"
+    features.operators.openshift.io/token-auth-gcp: "false"
+    # Architecture support
+    operatorframework.io/arch.amd64: supported
+    operatorframework.io/arch.arm64: supported
+    operatorframework.io/os.linux: supported
+  name: stateful-singleton.v0.0.1
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: StatefulSingleton is a resource that manages controlled transitions for stateful singleton applications
+      displayName: Stateful Singleton
+      kind: StatefulSingleton
+      name: statefulsingletons.apps.statefulsingleton.com
+      version: v1
+  description: |
+    The StatefulSingleton Operator manages controlled transitions for stateful singleton applications in Kubernetes clusters.
+    
+    ## Configuration Options
+    
+    ### Cluster Type Configuration
+    By default, this operator uses cert-manager for webhook certificates (standard Kubernetes).
+    
+    For OpenShift clusters, override the CLUSTER_TYPE environment variable in your Subscription:
+    ```yaml
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: Subscription
+    spec:
+      config:
+        env:
+        - name: CLUSTER_TYPE
+          value: "openshift"
+    ```
+    
+    - `kubernetes` (default): Uses cert-manager for webhook certificates
+    - `openshift`: Uses OpenShift service serving certificates
+  displayName: StatefulSingleton Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          - pods
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - pods/exec
+          verbs:
+          - create
+        - apiGroups:
+          - ""
+          resources:
+          - pods/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - apps.statefulsingleton.com
+          resources:
+          - statefulsingletons
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - apps.statefulsingleton.com
+          resources:
+          - statefulsingletons/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - apps.statefulsingleton.com
+          resources:
+          - statefulsingletons/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - cert-manager.io
+          resources:
+          - certificates
+          - issuers
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        serviceAccountName: stateful-singleton-controller-manager
+      deployments:
+      - label:
+          app.kubernetes.io/name: stateful-singleton
+          control-plane: controller-manager
+        name: stateful-singleton-controller-manager
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: stateful-singleton
+              control-plane: controller-manager
+          template:
+            metadata:
+              annotations:
+                kubectl.kubernetes.io/default-container: manager
+              labels:
+                app.kubernetes.io/name: stateful-singleton
+                control-plane: controller-manager
+            spec:
+              containers:
+              - args:
+                - --leader-elect
+                - --health-probe-bind-address=:8081
+                - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+                command:
+                - /manager
+                image: controller:latest
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: manager
+                ports:
+                - containerPort: 9443
+                  name: webhook-server
+                  protocol: TCP
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+                volumeMounts:
+                - mountPath: /tmp/k8s-webhook-server/serving-certs
+                  name: webhook-certs
+                  readOnly: true
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              serviceAccountName: stateful-singleton-controller-manager
+              terminationGracePeriodSeconds: 10
+              volumes:
+              - name: webhook-certs
+                secret:
+                  secretName: webhook-server-cert
+      permissions: []
+    strategy: deployment
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - stateful
+  - singleton
+  - kubernetes
+  - operators
+  links:
+  - name: Stateful Singleton
+    url: https://stateful-singleton.domain
+  maintainers:
+  - email: maintainer@stateful-singleton.domain
+    name: Maintainer
+  maturity: alpha
+  provider:
+    name: StatefulSingleton Community
+  version: 0.0.1
+  webhookdefinitions:
+  - admissionReviewVersions:
+    - v1
+    containerPort: 9443
+    deploymentName: stateful-singleton-controller-manager
+    failurePolicy: Ignore
+    generateName: mpod.kb.io
+    rules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - pods
+    sideEffects: None
+    targetPort: 9443
+    type: MutatingAdmissionWebhook
+    webhookPath: /mutate--v1-pod

@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# OpenShift configuration - uses service serving certificates instead of cert-manager
+resources:
+- ../crd
+- ../rbac  
+- ../manager
+- ../webhook
+
+# Use the same namespace and prefix as default
+namespace: stateful-singleton-system
+namePrefix: stateful-singleton-
+
+# Patches for OpenShift-specific configuration
+patches:
+# Add OpenShift service annotation to webhook service
+- target:
+    kind: Service
+    name: webhook-service
+  patch: |-
+    - op: replace
+      path: /metadata/annotations
+      value:
+        service.alpha.openshift.io/serving-cert-secret-name: webhook-server-cert
+# Add environment variable to specify cluster type  
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env
+      value:
+      - name: CLUSTER_TYPE
+        value: "openshift"
