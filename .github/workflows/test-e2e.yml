@@ -80,6 +80,9 @@ jobs:
           
           # Create cluster
           kind create cluster --name statefulsingleton-e2e-${{ matrix.go-version }} --config kind-config.yaml
+          # Install cert-manager
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
+          kubectl wait --for=condition=available --timeout=600s deployment/cert-manager-webhook -n cert-manager
 
       - name: Download dependencies
         run: go mod download
@@ -103,7 +106,7 @@ jobs:
       - name: Run E2E tests
         run: |
           export KUBECONFIG="$(kind get kubeconfig-path --name statefulsingleton-e2e-${{ matrix.go-version }} || echo ~/.kube/config)"
-          make test-e2e
+          CERT_MANAGER_INSTALL_SKIP=true make test-e2e
         env:
           ENABLE_WEBHOOKS: "true"
 
