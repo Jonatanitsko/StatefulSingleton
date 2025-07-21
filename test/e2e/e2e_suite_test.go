@@ -37,6 +37,7 @@ var (
 	// These variables are useful if CertManager is already installed, avoiding
 	// re-installation and conflicts.
 	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
+	operatorInstall        = os.Getenv("OPERATOR_INSTALL") == "false"
 	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
 	isCertManagerAlreadyInstalled = false
 
@@ -87,27 +88,31 @@ var _ = BeforeSuite(func() {
 		}
 	}
 
-	By("deploying the operator to the cluster")
-	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the operator")
+	if operatorInstall {
+		By("deploying the operator to the cluster")
+		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the operator")
 
-	// Wait for operator to be ready
-	By("waiting for operator to be ready")
-	cmd = exec.Command("kubectl", "wait", "deployment/stateful-singleton-controller-manager",
-		"--for=condition=Available",
-		"--namespace=stateful-singleton-system",
-		"--timeout=300s")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Operator deployment did not become ready in time")
+		// Wait for operator to be ready
+		By("waiting for operator to be ready")
+		cmd = exec.Command("kubectl", "wait", "deployment/stateful-singleton-controller-manager",
+			"--for=condition=Available",
+			"--namespace=stateful-singleton-system",
+			"--timeout=300s")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Operator deployment did not become ready in time")
+	}
 
 	_, _ = fmt.Fprintf(GinkgoWriter, "E2E test environment setup complete\n")
 })
 
 var _ = AfterSuite(func() {
-	By("undeploying the operator")
-	cmd := exec.Command("make", "undeploy")
-	_, _ = utils.Run(cmd)
+	if operatorInstall {
+		By("undeploying the operator")
+		cmd := exec.Command("make", "undeploy")
+		_, _ = utils.Run(cmd)
+	}
 
 	// Teardown CertManager after the suite if not skipped and if it was not already installed
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
