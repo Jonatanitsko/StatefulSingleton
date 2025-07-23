@@ -47,6 +47,36 @@ func IsPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// IsPodFailed checks if a pod is in a failed state that prevents normal termination
+func IsPodFailed(pod *corev1.Pod) bool {
+	// Check if pod phase is Failed
+	if pod.Status.Phase == corev1.PodFailed {
+		return true
+	}
+
+	// Check for containers in CrashLoopBackOff or other failed states
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.State.Waiting != nil {
+			reason := containerStatus.State.Waiting.Reason
+			// Common failed container states
+			if reason == "CrashLoopBackOff" ||
+				reason == "ImagePullBackOff" ||
+				reason == "ErrImagePull" ||
+				reason == "InvalidImageName" ||
+				reason == "CreateContainerConfigError" {
+				return true
+			}
+		}
+
+		// Check if container has high restart count (indicating repeated failures)
+		if containerStatus.RestartCount > 3 {
+			return true
+		}
+	}
+
+	return false
+}
+
 // isTestEnvironment detects if we're running in envtest
 func isTestEnvironment() bool {
 	for _, arg := range os.Args {

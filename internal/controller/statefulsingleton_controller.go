@@ -23,12 +23,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	appsv1kube "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,6 +61,10 @@ type StatefulSingletonReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=core,resources=replicationcontrollers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps.openshift.io,resources=deploymentconfigs,verbs=get;list;watch
 
 // Reconcile handles StatefulSingleton resources
 func (r *StatefulSingletonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -143,6 +149,12 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		}
 
 		if !hasSignal {
+			// Check if pod is running before creating start signal
+			if !podutil.IsPodRunning(pod) {
+				logger.Info("Pod not running yet, requeuing", "pod", pod.Name, "phase", pod.Status.Phase)
+				return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			}
+
 			logger.Info("Creating start signal for single pod", "pod", pod.Name)
 
 			// Create signal file
@@ -241,18 +253,82 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		}
 	}
 
-	// If old pod still exists, we must wait even after grace period
+	// If old pod still exists, we must wait even after grace period. We do handle deployments with max surge neq to 0.
 	if oldPodExists {
-		// Keep new pod in not-ready state
-		if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
-			"Waiting for old pod to completely terminate"); err != nil {
-			return ctrl.Result{}, err
-		}
+		// Check if old pod is in a failed state (CrashLoopBackOff, Failed, etc.)
+		oldPodFailed := podutil.IsPodFailed(&currentOldPod)
 
-		// Update status
-		return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
-			fmt.Sprintf("Waiting for pod %s to completely terminate",
-				oldPod.Name))
+		// Check if old pod is terminating
+		oldPodTerminating := podutil.IsPodTerminating(&currentOldPod)
+
+		if oldPodFailed {
+			logger.Info("Old pod is in failed state, proceeding with transition",
+				"pod", currentOldPod.Name, "phase", currentOldPod.Status.Phase)
+
+			// Don't wait for failed pods - proceed with transition
+		} else if !oldPodTerminating {
+			// Check if this is a RollingUpdate deployment with MaxSurge > 0
+			// which requires controlled termination to break the deadlock
+			isRollingUpdateWithSurge, err := r.isRollingUpdateWithSurge(ctx, oldPod, newPod)
+			if err != nil {
+				logger.Error(err, "Failed to check deployment strategy")
+				return ctrl.Result{}, err
+			}
+
+			if isRollingUpdateWithSurge {
+				// Rolling update with surge detected: scale down old ReplicaSet to break deadlock
+				logger.Info("RollingUpdate with MaxSurge > 0 detected, scaling down old ReplicaSet",
+					"oldPod", currentOldPod.Name, "newPod", newPod.Name)
+
+				// Find and scale down the old ReplicaSet
+				err := r.scaleDownOldReplicaSet(ctx, oldPod, logger)
+				if err != nil {
+					logger.Error(err, "Failed to scale down old ReplicaSet", "oldPod", currentOldPod.Name)
+					return ctrl.Result{}, err
+				}
+
+				// Keep new pod not ready until old pod is completely gone
+				if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
+					"Old ReplicaSet scaling down (controlled termination)"); err != nil {
+					return ctrl.Result{}, err
+				}
+
+				// Update status
+				return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+					fmt.Sprintf("Scaled down old ReplicaSet for pod %s to break RollingUpdate deadlock",
+						oldPod.Name))
+			} else {
+				// Non-surge deployment or Recreate strategy - wait for natural termination
+				logger.Info("Non-surge deployment detected, waiting for natural pod lifecycle",
+					"oldPod", currentOldPod.Name, "newPod", newPod.Name)
+
+				// Keep new pod in not-ready state for healthy pods
+				if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
+					"Waiting for old pod to begin natural termination"); err != nil {
+					return ctrl.Result{}, err
+				}
+
+				// Update status
+				return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+					fmt.Sprintf("Waiting for pod %s to begin natural termination",
+						oldPod.Name))
+			}
+		} else {
+			// Old pod is terminating - wait for complete termination
+			logger.Info("Old pod is terminating, waiting for complete termination",
+				"oldPod", currentOldPod.Name, "newPod", newPod.Name)
+
+			// Keep new pod not ready until old pod is completely gone
+			if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
+				"Waiting for old pod to completely terminate"); err != nil {
+				return ctrl.Result{}, err
+			}
+
+			// Update status
+			return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+				fmt.Sprintf("Waiting for pod %s to completely terminate",
+					oldPod.Name))
+		}
 	}
 
 	// Old pod is completely gone, signal the new pod to start
@@ -332,24 +408,59 @@ echo "StatefulSingleton: Start signal received, executing application"
 
 # Parse the captured entrypoint information
 if [ -n "$ORIGINAL_ENTRYPOINT" ]; then
+  echo "StatefulSingleton: DEBUG - ORIGINAL_ENTRYPOINT: $ORIGINAL_ENTRYPOINT"
   ENTRYPOINT_JSON="$ORIGINAL_ENTRYPOINT"
-  COMMAND=$(echo "$ENTRYPOINT_JSON" | grep -o '"command":\[[^]]*\]' | sed 's/"command":\[//;s/\]//' | tr -d '"' | tr ',' ' ')
-  ARGS=$(echo "$ENTRYPOINT_JSON" | grep -o '"args":\[[^]]*\]' | sed 's/"args":\[//;s/\]//' | tr -d '"' | tr ',' ' ')
+  
+  # Extract command and args arrays from JSON, handling quoted strings properly
+  COMMAND_ARRAY=$(echo "$ENTRYPOINT_JSON" | grep -o '"command":\[[^]]*\]' | sed 's/"command":\[//;s/\]$//')
+  ARGS_ARRAY=$(echo "$ENTRYPOINT_JSON" | grep -o '"args":\[[^]]*\]' | sed 's/"args":\[//;s/\]$//')
+  
+  echo "StatefulSingleton: DEBUG - COMMAND_ARRAY: '$COMMAND_ARRAY'"
+  echo "StatefulSingleton: DEBUG - ARGS_ARRAY: '$ARGS_ARRAY'"
+  
+  # Convert JSON arrays to shell arguments, preserving quoted strings
+  if [ -n "$COMMAND_ARRAY" ] && [ "$COMMAND_ARRAY" != "null" ]; then
+    COMMAND=$(echo "$COMMAND_ARRAY" | sed 's/,/ /g' | sed 's/"//g')
+  else
+    COMMAND=""
+  fi
+  
+  if [ -n "$ARGS_ARRAY" ] && [ "$ARGS_ARRAY" != "null" ]; then
+    ARGS=$(echo "$ARGS_ARRAY" | sed 's/,/ /g' | sed 's/"//g')
+  else
+    ARGS=""
+  fi
+  
+  echo "StatefulSingleton: DEBUG - Final COMMAND: '$COMMAND'"
+  echo "StatefulSingleton: DEBUG - Final ARGS: '$ARGS'"
   
   # Execute based on what was captured from the pod spec
   if [ -n "$COMMAND" ]; then
-    echo "StatefulSingleton: Executing captured command: $COMMAND $ARGS"
-    exec $COMMAND $ARGS
+    echo "StatefulSingleton: DEBUG - Taking COMMAND path"
+    if [ -n "$ARGS" ]; then
+      echo "StatefulSingleton: Executing captured command with args: $COMMAND $ARGS"
+      echo "StatefulSingleton: DEBUG - About to exec: sh -c \"$COMMAND $ARGS\""
+      exec sh -c "$COMMAND $ARGS"
+    else
+      echo "StatefulSingleton: Executing captured command: $COMMAND"
+      echo "StatefulSingleton: DEBUG - About to exec: sh -c \"$COMMAND\""
+      exec sh -c "$COMMAND"
+    fi
   elif [ -n "$ARGS" ]; then
+    echo "StatefulSingleton: DEBUG - Taking ARGS-only path"
     echo "StatefulSingleton: Executing captured args: $ARGS"
-    exec $ARGS
+    echo "StatefulSingleton: DEBUG - About to exec: sh -c \"$ARGS\""
+    exec sh -c "$ARGS"
   else
+    echo "StatefulSingleton: DEBUG - Taking discovery path (no command/args)"
     # Both command and args were empty - container relies on Dockerfile ENTRYPOINT/CMD
     echo "StatefulSingleton: No explicit command/args, attempting to discover image entrypoint"
     
     # Strategy 1: Try to find common entrypoint script locations
     if [ -f "/docker-entrypoint.sh" ]; then
       echo "StatefulSingleton: Found /docker-entrypoint.sh, executing..."
+      echo "StatefulSingleton: DEBUG - About to exec: /docker-entrypoint.sh (with no args)"
+      echo "StatefulSingleton: DEBUG - This is likely the problem - entrypoint needs args!"
       exec /docker-entrypoint.sh
     elif [ -f "/entrypoint.sh" ]; then
       echo "StatefulSingleton: Found /entrypoint.sh, executing..."
@@ -449,18 +560,22 @@ if [ -n "$ORIGINAL_ENTRYPOINT" ]; then
     done
     
     # Final fallback - log warning and provide shell access for debugging
+    echo "StatefulSingleton: DEBUG - Reached final fallback - no entrypoint discovered"
     echo "StatefulSingleton: WARNING - Could not automatically determine application entrypoint"
     echo "StatefulSingleton: This usually means the container relies on a Dockerfile ENTRYPOINT/CMD"
     echo "StatefulSingleton: that could not be automatically discovered."
     echo "StatefulSingleton: Please check the container image documentation or consider"
     echo "StatefulSingleton: specifying explicit command/args in your pod specification."
     echo "StatefulSingleton: Starting shell for manual investigation..."
+    echo "StatefulSingleton: DEBUG - About to exec: /bin/sh"
     exec /bin/sh
   fi
 else
   # Fallback if somehow ORIGINAL_ENTRYPOINT wasn't set (should never happen)
+  echo "StatefulSingleton: DEBUG - ORIGINAL_ENTRYPOINT is empty or unset!"
   echo "StatefulSingleton: ERROR - No entrypoint information available"
   echo "StatefulSingleton: This indicates a problem with the operator setup"
+  echo "StatefulSingleton: DEBUG - About to exec: /bin/sh (emergency fallback)"
   exec /bin/sh
 fi`
 
@@ -581,6 +696,109 @@ func (r *StatefulSingletonReconciler) findObjectsForPod(ctx context.Context, pod
 	}
 
 	return requests
+}
+
+// scaleDownOldReplicaSet scales down the ReplicaSet that owns the old pod to 0 replicas
+func (r *StatefulSingletonReconciler) scaleDownOldReplicaSet(ctx context.Context, oldPod *corev1.Pod, logger logr.Logger) error {
+	// Find the ReplicaSet that owns the old pod
+	for _, ownerRef := range oldPod.OwnerReferences {
+		if ownerRef.Kind == "ReplicaSet" {
+			// Get the ReplicaSet
+			var rs appsv1kube.ReplicaSet
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      ownerRef.Name,
+				Namespace: oldPod.Namespace,
+			}, &rs); err != nil {
+				return fmt.Errorf("failed to get ReplicaSet %s: %w", ownerRef.Name, err)
+			}
+
+			// Check if already scaled down
+			if rs.Spec.Replicas != nil && *rs.Spec.Replicas == 0 {
+				logger.Info("ReplicaSet already scaled down", "replicaSet", rs.Name)
+				return nil
+			}
+
+			// Scale down to 0
+			zero := int32(0)
+			rs.Spec.Replicas = &zero
+
+			if err := r.Update(ctx, &rs); err != nil {
+				return fmt.Errorf("failed to scale down ReplicaSet %s: %w", rs.Name, err)
+			}
+
+			logger.Info("Successfully scaled down ReplicaSet", "replicaSet", rs.Name, "oldReplicas", rs.Status.Replicas, "newReplicas", 0)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no ReplicaSet owner found for pod %s", oldPod.Name)
+}
+
+// isRollingUpdateWithSurge checks if the pods belong to a RollingUpdate deployment with MaxSurge > 0
+func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Context, oldPod, newPod *corev1.Pod) (bool, error) {
+	// Find the deployment that owns these pods by looking at owner references
+	var deployment *appsv1kube.Deployment
+
+	// Check old pod's owner references
+	for _, ownerRef := range oldPod.OwnerReferences {
+		if ownerRef.Kind == "ReplicaSet" {
+			// Get the ReplicaSet
+			var rs appsv1kube.ReplicaSet
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      ownerRef.Name,
+				Namespace: oldPod.Namespace,
+			}, &rs); err != nil {
+				continue // Try next owner reference
+			}
+
+			// Check ReplicaSet's owner references for Deployment
+			for _, rsOwnerRef := range rs.OwnerReferences {
+				if rsOwnerRef.Kind == "Deployment" {
+					var dep appsv1kube.Deployment
+					if err := r.Get(ctx, types.NamespacedName{
+						Name:      rsOwnerRef.Name,
+						Namespace: oldPod.Namespace,
+					}, &dep); err == nil {
+						deployment = &dep
+						break
+					}
+				}
+			}
+			if deployment != nil {
+				break
+			}
+		}
+	}
+
+	if deployment == nil {
+		// Could not find deployment - assume not a rolling update with surge
+		return false, nil
+	}
+
+	// Check if deployment uses RollingUpdate strategy
+	if deployment.Spec.Strategy.Type != appsv1kube.RollingUpdateDeploymentStrategyType {
+		return false, nil
+	}
+
+	// Check if MaxSurge > 0
+	rollingUpdate := deployment.Spec.Strategy.RollingUpdate
+	if rollingUpdate == nil {
+		// Default RollingUpdate settings have MaxSurge > 0
+		return true, nil
+	}
+
+	if rollingUpdate.MaxSurge == nil {
+		// Default MaxSurge is 25%, which means surge is allowed
+		return true, nil
+	}
+
+	// Check if MaxSurge > 0
+	maxSurge, err := intstr.GetValueFromIntOrPercent(rollingUpdate.MaxSurge, int(*deployment.Spec.Replicas), true)
+	if err != nil {
+		return false, err
+	}
+
+	return maxSurge > 0, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
