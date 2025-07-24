@@ -201,6 +201,11 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 			r.Recorder.Event(singleton, corev1.EventTypeWarning, "TransitionTimeout",
 				fmt.Sprintf("Transition from %s to %s exceeded timeout of %d seconds",
 					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
+
+			// Update status to reflect transition timeout
+			return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+				fmt.Sprintf("Transition from %s to %s exceeded transition timeout of %d seconds",
+					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
 		}
 	}
 
@@ -269,7 +274,7 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		} else if !oldPodTerminating {
 			// Check if this is a RollingUpdate deployment with MaxSurge > 0
 			// which requires controlled termination to break the deadlock
-			isRollingUpdateWithSurge, err := r.isRollingUpdateWithSurge(ctx, oldPod, newPod)
+			isRollingUpdateWithSurge, err := r.isRollingUpdateWithSurge(ctx, oldPod)
 			if err != nil {
 				logger.Error(err, "Failed to check deployment strategy")
 				return ctrl.Result{}, err
@@ -363,6 +368,7 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 	return r.updateStatus(ctx, singleton, newPod.Name, "Running",
 		fmt.Sprintf("Pod %s is running", newPod.Name))
 }
+
 
 // getPodsForStatefulSingleton returns pods managed by this StatefulSingleton
 func (r *StatefulSingletonReconciler) getPodsForStatefulSingleton(
@@ -735,7 +741,7 @@ func (r *StatefulSingletonReconciler) scaleDownOldReplicaSet(ctx context.Context
 }
 
 // isRollingUpdateWithSurge checks if the pods belong to a RollingUpdate deployment with MaxSurge > 0
-func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Context, oldPod, newPod *corev1.Pod) (bool, error) {
+func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Context, oldPod *corev1.Pod) (bool, error) {
 	// Find the deployment that owns these pods by looking at owner references
 	var deployment *appsv1kube.Deployment
 
