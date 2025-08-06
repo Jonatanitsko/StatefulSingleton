@@ -184,29 +184,9 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 
 	logger.Info("Handling pod transition", "oldPod", oldPod.Name, "newPod", newPod.Name)
 
-	// Check if transition is already in progress
-	isTransitioning := singleton.Status.Phase == phaseTransitioning
-	if isTransitioning && singleton.Status.TransitionTimestamp != nil {
-		// Calculate how long we've been transitioning
-		transitionDuration := time.Since(singleton.Status.TransitionTimestamp.Time)
-		maxDuration := time.Duration(singleton.Spec.MaxTransitionTime) * time.Second
-
-		// Check if we've exceeded the maximum transition time
-		if transitionDuration > maxDuration {
-			logger.Info("Transition exceeded max duration",
-				"duration", transitionDuration.Seconds(),
-				"maxDuration", maxDuration.Seconds())
-
-			// Log warning event
-			r.Recorder.Event(singleton, corev1.EventTypeWarning, "TransitionTimeout",
-				fmt.Sprintf("Transition from %s to %s exceeded timeout of %d seconds",
-					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
-
-			// Update status to reflect transition timeout
-			return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
-				fmt.Sprintf("Transition from %s to %s exceeded transition timeout of %d seconds",
-					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
-		}
+	// Check if transition timeout has been exceeded
+	if result, err := r.checkTransitionTimeout(ctx, singleton, oldPod, newPod, logger); result != nil {
+		return *result, err
 	}
 
 	// Check if old pod still exists
@@ -224,38 +204,8 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 	}
 
 	// If old pod exists and is terminating, check if we need to respect grace period
-	if oldPodExists && podutil.IsPodTerminating(&currentOldPod) {
-		// Get the effective grace period
-		gracePeriod := podutil.GetEffectiveGracePeriod(
-			&currentOldPod,
-			singleton.Spec.TerminationGracePeriod,
-			singleton.Spec.RespectPodGracePeriod,
-		)
-
-		// Calculate how long the pod has been terminating
-		if currentOldPod.DeletionTimestamp != nil {
-			terminatingDuration := time.Since(currentOldPod.DeletionTimestamp.Time)
-
-			logger.Info("Old pod terminating",
-				"pod", currentOldPod.Name,
-				"terminatingFor", terminatingDuration.Seconds(),
-				"gracePeriod", gracePeriod)
-
-			// If still within grace period, wait
-			if terminatingDuration.Seconds() < float64(gracePeriod) {
-				// Keep new pod in not-ready state
-				if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
-					fmt.Sprintf("Waiting for old pod to terminate (grace period: %ds, elapsed: %.1fs)",
-						gracePeriod, terminatingDuration.Seconds())); err != nil {
-					return ctrl.Result{}, err
-				}
-
-				// Update status
-				return r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
-					fmt.Sprintf("Respecting grace period: waiting for pod %s to terminate (%.1fs of %ds)",
-						oldPod.Name, terminatingDuration.Seconds(), gracePeriod))
-			}
-		}
+	if result, err := r.handleGracePeriod(ctx, singleton, oldPod, newPod, &currentOldPod, oldPodExists, logger); result != nil {
+		return *result, err
 	}
 
 	// If old pod still exists, we must wait even after grace period. We do handle deployments with max surge neq to 0.
@@ -369,7 +319,6 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		fmt.Sprintf("Pod %s is running", newPod.Name))
 }
 
-
 // getPodsForStatefulSingleton returns pods managed by this StatefulSingleton
 func (r *StatefulSingletonReconciler) getPodsForStatefulSingleton(
 	ctx context.Context,
@@ -392,6 +341,89 @@ func (r *StatefulSingletonReconciler) getPodsForStatefulSingleton(
 	}
 
 	return podList.Items, nil
+}
+
+// checkTransitionTimeout checks if transition has exceeded timeout and returns result if timeout occurred
+func (r *StatefulSingletonReconciler) checkTransitionTimeout(
+	ctx context.Context,
+	singleton *appsv1.StatefulSingleton,
+	oldPod, newPod *corev1.Pod,
+	logger logr.Logger,
+) (*ctrl.Result, error) {
+	// Check if transition is already in progress
+	isTransitioning := singleton.Status.Phase == phaseTransitioning
+	if isTransitioning && singleton.Status.TransitionTimestamp != nil {
+		// Calculate how long we've been transitioning
+		transitionDuration := time.Since(singleton.Status.TransitionTimestamp.Time)
+		maxDuration := time.Duration(singleton.Spec.MaxTransitionTime) * time.Second
+
+		// Check if we've exceeded the maximum transition time
+		if transitionDuration > maxDuration {
+			logger.Info("Transition exceeded max duration",
+				"duration", transitionDuration.Seconds(),
+				"maxDuration", maxDuration.Seconds())
+
+			// Log warning event
+			r.Recorder.Event(singleton, corev1.EventTypeWarning, "TransitionTimeout",
+				fmt.Sprintf("Transition from %s to %s exceeded timeout of %d seconds",
+					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
+
+			// Update status to reflect transition timeout
+			result, err := r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+				fmt.Sprintf("Transition from %s to %s exceeded transition timeout of %d seconds",
+					oldPod.Name, newPod.Name, singleton.Spec.MaxTransitionTime))
+			return &result, err
+		}
+	}
+
+	return nil, nil
+}
+
+// handleGracePeriod handles grace period logic for terminating pods
+func (r *StatefulSingletonReconciler) handleGracePeriod(
+	ctx context.Context,
+	singleton *appsv1.StatefulSingleton,
+	oldPod, newPod, currentOldPod *corev1.Pod,
+	oldPodExists bool,
+	logger logr.Logger,
+) (*ctrl.Result, error) {
+	// If old pod exists and is terminating, check if we need to respect grace period
+	if oldPodExists && podutil.IsPodTerminating(currentOldPod) {
+		// Get the effective grace period
+		gracePeriod := podutil.GetEffectiveGracePeriod(
+			currentOldPod,
+			singleton.Spec.TerminationGracePeriod,
+			singleton.Spec.RespectPodGracePeriod,
+		)
+
+		// Calculate how long the pod has been terminating
+		if currentOldPod.DeletionTimestamp != nil {
+			terminatingDuration := time.Since(currentOldPod.DeletionTimestamp.Time)
+
+			logger.Info("Old pod terminating",
+				"pod", currentOldPod.Name,
+				"terminatingFor", terminatingDuration.Seconds(),
+				"gracePeriod", gracePeriod)
+
+			// If still within grace period, wait
+			if terminatingDuration.Seconds() < float64(gracePeriod) {
+				// Keep new pod in not-ready state
+				if err := podutil.UpdateReadinessCondition(ctx, r.Client, newPod, false,
+					fmt.Sprintf("Waiting for old pod to terminate (grace period: %ds, elapsed: %.1fs)",
+						gracePeriod, terminatingDuration.Seconds())); err != nil {
+					return nil, err
+				}
+
+				// Update status
+				result, err := r.updateStatus(ctx, singleton, oldPod.Name, phaseTransitioning,
+					fmt.Sprintf("Respecting grace period: waiting for pod %s to terminate (%.1fs of %ds)",
+						oldPod.Name, terminatingDuration.Seconds(), gracePeriod))
+				return &result, err
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // ensureWrapperConfigMap creates or updates the wrapper script ConfigMap
