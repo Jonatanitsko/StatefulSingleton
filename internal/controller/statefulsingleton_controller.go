@@ -224,11 +224,14 @@ func (r *StatefulSingletonReconciler) handlePodTransitions(
 		} else if !oldPodTerminating {
 			// Check if this is a RollingUpdate deployment with MaxSurge > 0
 			// which requires controlled termination to break the deadlock
+			logger.Info("Old pod is not terminating, checking deployment strategy", "oldPod", currentOldPod.Name)
 			isRollingUpdateWithSurge, err := r.isRollingUpdateWithSurge(ctx, oldPod)
 			if err != nil {
 				logger.Error(err, "Failed to check deployment strategy")
 				return ctrl.Result{}, err
 			}
+
+			logger.Info("Deployment strategy check result", "isRollingUpdateWithSurge", isRollingUpdateWithSurge)
 
 			if isRollingUpdateWithSurge {
 				// Rolling update with surge detected: scale down old ReplicaSet to break deadlock
@@ -664,11 +667,15 @@ func (r *StatefulSingletonReconciler) updateStatus(
 	phase string,
 	message string,
 ) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithName("controller")
+
 	// Check if status has changed
 	if singleton.Status.ActivePod == activePod &&
 		singleton.Status.Phase == phase &&
 		singleton.Status.Message == message {
 		// No changes needed
+		logger.Info("Status unchanged, no update needed",
+			"activePod", activePod, "phase", phase, "message", message)
 
 		// Determine requeue interval based on state
 		if phase == phaseTransitioning {
@@ -774,11 +781,16 @@ func (r *StatefulSingletonReconciler) scaleDownOldReplicaSet(ctx context.Context
 
 // isRollingUpdateWithSurge checks if the pods belong to a RollingUpdate deployment with MaxSurge > 0
 func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Context, oldPod *corev1.Pod) (bool, error) {
+	logger := log.FromContext(ctx).WithName("controller")
+	logger.Info("Checking if pod belongs to RollingUpdate deployment with surge", "pod", oldPod.Name)
+
 	// Find the deployment that owns these pods by looking at owner references
 	var deployment *appsv1kube.Deployment
 
 	// Check old pod's owner references
+	logger.Info("Checking pod owner references", "ownerRefs", len(oldPod.OwnerReferences))
 	for _, ownerRef := range oldPod.OwnerReferences {
+		logger.Info("Found owner reference", "kind", ownerRef.Kind, "name", ownerRef.Name)
 		if ownerRef.Kind == "ReplicaSet" {
 			// Get the ReplicaSet
 			var rs appsv1kube.ReplicaSet
@@ -786,11 +798,14 @@ func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Conte
 				Name:      ownerRef.Name,
 				Namespace: oldPod.Namespace,
 			}, &rs); err != nil {
+				logger.Error(err, "Failed to get ReplicaSet", "replicaSet", ownerRef.Name)
 				continue // Try next owner reference
 			}
 
+			logger.Info("Found ReplicaSet, checking its owner references", "replicaSet", rs.Name, "ownerRefs", len(rs.OwnerReferences))
 			// Check ReplicaSet's owner references for Deployment
 			for _, rsOwnerRef := range rs.OwnerReferences {
+				logger.Info("Found ReplicaSet owner reference", "kind", rsOwnerRef.Kind, "name", rsOwnerRef.Name)
 				if rsOwnerRef.Kind == "Deployment" {
 					var dep appsv1kube.Deployment
 					if err := r.Get(ctx, types.NamespacedName{
@@ -798,7 +813,10 @@ func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Conte
 						Namespace: oldPod.Namespace,
 					}, &dep); err == nil {
 						deployment = &dep
+						logger.Info("Found Deployment", "deployment", dep.Name)
 						break
+					} else {
+						logger.Error(err, "Failed to get Deployment", "deployment", rsOwnerRef.Name)
 					}
 				}
 			}
@@ -810,11 +828,15 @@ func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Conte
 
 	if deployment == nil {
 		// Could not find deployment - assume not a rolling update with surge
+		logger.Info("Could not find deployment for pod", "pod", oldPod.Name)
 		return false, nil
 	}
 
+	logger.Info("Checking deployment strategy", "deployment", deployment.Name, "strategyType", deployment.Spec.Strategy.Type)
+
 	// Check if deployment uses RollingUpdate strategy
 	if deployment.Spec.Strategy.Type != appsv1kube.RollingUpdateDeploymentStrategyType {
+		logger.Info("Deployment does not use RollingUpdate strategy", "strategyType", deployment.Spec.Strategy.Type)
 		return false, nil
 	}
 
@@ -822,20 +844,24 @@ func (r *StatefulSingletonReconciler) isRollingUpdateWithSurge(ctx context.Conte
 	rollingUpdate := deployment.Spec.Strategy.RollingUpdate
 	if rollingUpdate == nil {
 		// Default RollingUpdate settings have MaxSurge > 0
+		logger.Info("RollingUpdate settings are nil, using defaults (MaxSurge > 0)")
 		return true, nil
 	}
 
 	if rollingUpdate.MaxSurge == nil {
 		// Default MaxSurge is 25%, which means surge is allowed
+		logger.Info("MaxSurge is nil, using default (25% > 0)")
 		return true, nil
 	}
 
 	// Check if MaxSurge > 0
 	maxSurge, err := intstr.GetValueFromIntOrPercent(rollingUpdate.MaxSurge, int(*deployment.Spec.Replicas), true)
 	if err != nil {
+		logger.Error(err, "Failed to calculate MaxSurge value")
 		return false, err
 	}
 
+	logger.Info("Calculated MaxSurge value", "maxSurge", maxSurge, "replicas", *deployment.Spec.Replicas)
 	return maxSurge > 0, nil
 }
 
