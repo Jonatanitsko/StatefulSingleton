@@ -132,8 +132,13 @@ spec:
                 - Transitioning
                 - Failed
                 type: string
+              statusTimestamp:
+                description: StatusTimestamp is when the status was last updated
+                format: date-time
+                type: string
               transitionTimestamp:
-                description: TransitionTimestamp is when the last transition started
+                description: TransitionTimestamp is when the last pod-to-pod transition
+                  started (only set during Transitioning phase)
                 format: date-time
                 type: string
             type: object
