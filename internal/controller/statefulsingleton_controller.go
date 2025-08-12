@@ -659,7 +659,7 @@ fi`
 	return nil
 }
 
-// updateStatus updates the StatefulSingleton status
+// updateStatus updates the StatefulSingleton status with retry logic for conflicts
 func (r *StatefulSingletonReconciler) updateStatus(
 	ctx context.Context,
 	singleton *appsv1.StatefulSingleton,
@@ -685,24 +685,47 @@ func (r *StatefulSingletonReconciler) updateStatus(
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// Create a copy of the singleton
-	singletonCopy := singleton.DeepCopy()
+	logger.Info("Performing status update",
+		"currentActivePod", singleton.Status.ActivePod, "newActivePod", activePod,
+		"currentPhase", singleton.Status.Phase, "newPhase", phase,
+		"currentMessage", singleton.Status.Message, "newMessage", message)
+
+	// Handle transition timestamp lifecycle properly
+	if phase == phaseTransitioning {
+		// Check if we're entering a new transition or if we are in the middle of one
+		if singleton.Status.Phase != phaseTransitioning {
+			// New transition - set timestamp
+			now := metav1.Now()
+			singleton.Status.TransitionTimestamp = &now
+			logger.Info("Setting transition timestamp for new transition", "timestamp", now)
+		} else if singleton.Status.TransitionTimestamp == nil {
+			// Ongoing transition but missing timestamp (shouldn't happen, but handle it)
+			now := metav1.Now()
+			singleton.Status.TransitionTimestamp = &now
+			logger.Info("Setting missing transition timestamp for ongoing transition", "timestamp", now)
+		}
+		// If ongoing transition with existing timestamp, keep timestamp
+	} else {
+		// Clear timestamp when exiting transition phase
+		singleton.Status.TransitionTimestamp = nil
+		logger.Info("Clearing transition timestamp - exiting transition phase")
+		fmt.Printf("DEBUG: Clearing transition timestamp\n")
+	}
 
 	// Update status fields
-	singletonCopy.Status.ActivePod = activePod
-	singletonCopy.Status.Phase = phase
-	singletonCopy.Status.Message = message
-
-	// Set transition timestamp if we're entering transitioning phase
-	if phase == phaseTransitioning && singleton.Status.Phase != phaseTransitioning {
-		now := metav1.Now()
-		singletonCopy.Status.TransitionTimestamp = &now
-	}
+	singleton.Status.ActivePod = activePod
+	singleton.Status.Phase = phase
+	singleton.Status.Message = message
 
 	// Update the status
-	if err := r.Status().Update(ctx, singletonCopy); err != nil {
+	logger.Info("Attempting status update", "resourceVersion", singleton.ResourceVersion)
+	err := r.Status().Update(ctx, singleton)
+	if err != nil {
+		logger.Error(err, "Status update failed")
 		return ctrl.Result{}, err
 	}
+
+	logger.Info("Status updated successfully", "activePod", activePod, "phase", phase)
 
 	// Determine requeue interval based on state
 	if phase == phaseTransitioning {

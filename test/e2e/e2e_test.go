@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -65,8 +66,8 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 		By("creating test namespace")
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
 		err = k8sClient.Create(ctx, ns)
-		if err != nil {
-			// Namespace might already exist
+		if err != nil && !errors.IsAlreadyExists(err) {
+			// Only fail if it's not an "already exists" error
 			Expect(err).NotTo(HaveOccurred())
 		}
 	})
@@ -955,35 +956,44 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 		})
 
 		It("should handle transition timeouts correctly", func() {
+			// Use unique names to avoid conflicts with previous test runs
+			uniqueId := fmt.Sprintf("%d", time.Now().Unix())
+			testSingletonName := fmt.Sprintf("%s-%s", singletonName, uniqueId)
+			testDeploymentName := fmt.Sprintf("%s-%s", deploymentName, uniqueId)
 			labels := map[string]string{"app": "timeout-test"}
 
-			By("creating StatefulSingleton with short transition timeout")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 15, true) // 15 second timeout
+			By("creating StatefulSingleton with very short transition timeout")
+			singleton := createStatefulSingleton(testSingletonName, testNamespace, labels, 30, 1, true) // 1 second timeout
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
-			By("creating deployment with slow shutdown container")
+			By("creating deployment with slow-terminating container")
 			deployment := &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      deploymentName,
+					Name:      testDeploymentName,
 					Namespace: testNamespace,
 				},
 				Spec: appsv1.DeploymentSpec{
+					Strategy: appsv1.DeploymentStrategy{
+						Type: appsv1.RollingUpdateDeploymentStrategyType,
+						RollingUpdate: &appsv1.RollingUpdateDeployment{
+							MaxSurge:       &intstr.IntOrString{IntVal: 1},
+							MaxUnavailable: &intstr.IntOrString{IntVal: 0},
+						},
+					},
 					Replicas: int32Ptr(1),
 					Selector: &metav1.LabelSelector{MatchLabels: labels},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: labels},
 						Spec: corev1.PodSpec{
-							TerminationGracePeriodSeconds: int64Ptr(60), // Long shutdown
+							TerminationGracePeriodSeconds: int64Ptr(5), // Very short grace period
 							Containers: []corev1.Container{
 								{
-									Name:    "slow-shutdown",
-									Image:   "nginx:1.20",
-									Command: []string{"nginx"},
-									Args:    []string{"-g", "daemon off;"},
+									Name:  "nginx",
+									Image: "nginx:1.20",
 									Lifecycle: &corev1.Lifecycle{
 										PreStop: &corev1.LifecycleHandler{
 											Exec: &corev1.ExecAction{
-												Command: []string{"/bin/sh", "-c", "sleep 45"}, // 45 second shutdown
+												Command: []string{"sh", "-c", "sleep 10"}, // Slow termination - longer than grace period
 											},
 										},
 									},
@@ -995,11 +1005,11 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			}
 			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 
-			By("waiting for initial deployment")
+			By("waiting for initial stable state")
 			Eventually(func() string {
 				var ss statefulsingleton.StatefulSingleton
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: singletonName, Namespace: testNamespace,
+					Name: testSingletonName, Namespace: testNamespace,
 				}, &ss)
 				if err != nil {
 					return ""
@@ -1007,11 +1017,23 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				return ss.Status.Phase
 			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
 
-			By("triggering rolling update that will timeout")
+			By("ensuring StatefulSingleton is stable before rolling update")
+			Consistently(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: testSingletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 5*time.Second, 1*time.Second).Should(Equal("Running"))
+
+			By("triggering rolling update to create overlapping pods")
 			Eventually(func() error {
 				var currentDeployment appsv1.Deployment
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: deploymentName, Namespace: testNamespace,
+					Name: testDeploymentName, Namespace: testNamespace,
 				}, &currentDeployment)
 				if err != nil {
 					return err
@@ -1020,29 +1042,32 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				return k8sClient.Update(ctx, &currentDeployment)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
-			By("verifying transition timeout is handled")
+			By("verifying rolling update triggers transition")
 			Eventually(func() string {
 				var ss statefulsingleton.StatefulSingleton
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: singletonName, Namespace: testNamespace,
+					Name: testSingletonName, Namespace: testNamespace,
 				}, &ss)
 				if err != nil {
 					return ""
 				}
 				return ss.Status.Phase
-			}, 1*time.Minute, 2*time.Second).Should(Equal("Transitioning"))
+			}, 30*time.Second, 1*time.Second).Should(Equal("Transitioning"))
 
-			By("waiting for timeout and checking status message")
+			By("waiting for transition timeout to be detected")
 			Eventually(func() string {
 				var ss statefulsingleton.StatefulSingleton
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: singletonName, Namespace: testNamespace,
+					Name: testSingletonName, Namespace: testNamespace,
 				}, &ss)
 				if err != nil {
 					return ""
 				}
+				// Debug output
+				GinkgoWriter.Printf("DEBUG: Phase=%s, Message=%s, TransitionTimestamp=%v\n",
+					ss.Status.Phase, ss.Status.Message, ss.Status.TransitionTimestamp)
 				return ss.Status.Message
-			}, 2*time.Minute, 5*time.Second).Should(ContainSubstring("transition timeout"))
+			}, 30*time.Second, 2*time.Second).Should(ContainSubstring("exceeded transition timeout"))
 		})
 
 		It("should respect pod grace periods when configured", func() {
