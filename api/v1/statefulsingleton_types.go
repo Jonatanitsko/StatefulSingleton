@@ -55,9 +55,13 @@ type StatefulSingletonStatus struct {
 	// +kubebuilder:validation:Enum=Running;Transitioning;Failed
 	Phase string `json:"phase,omitempty"`
 
-	// TransitionTimestamp is when the last transition started
+	// TransitionTimestamp is when the last pod-to-pod transition started (only set during Transitioning phase)
 	// +optional
 	TransitionTimestamp *metav1.Time `json:"transitionTimestamp,omitempty"`
+
+	// StatusTimestamp is when the status was last updated
+	// +optional
+	StatusTimestamp *metav1.Time `json:"statusTimestamp,omitempty"`
 
 	// Message provides more information about the current phase
 	// +optional

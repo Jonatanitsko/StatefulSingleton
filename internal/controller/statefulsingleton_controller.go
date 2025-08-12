@@ -690,17 +690,20 @@ func (r *StatefulSingletonReconciler) updateStatus(
 		"currentPhase", singleton.Status.Phase, "newPhase", phase,
 		"currentMessage", singleton.Status.Message, "newMessage", message)
 
-	// Handle transition timestamp lifecycle properly
+	// Always update status timestamp for any status change
+	now := metav1.Now()
+	singleton.Status.StatusTimestamp = &now
+	logger.Info("Setting status timestamp", "timestamp", now)
+
+	// Handle transition timestamp lifecycle - only for pod-to-pod transitions
 	if phase == phaseTransitioning {
 		// Check if we're entering a new transition or if we are in the middle of one
 		if singleton.Status.Phase != phaseTransitioning {
 			// New transition - set timestamp
-			now := metav1.Now()
 			singleton.Status.TransitionTimestamp = &now
 			logger.Info("Setting transition timestamp for new transition", "timestamp", now)
 		} else if singleton.Status.TransitionTimestamp == nil {
 			// Ongoing transition but missing timestamp (shouldn't happen, but handle it)
-			now := metav1.Now()
 			singleton.Status.TransitionTimestamp = &now
 			logger.Info("Setting missing transition timestamp for ongoing transition", "timestamp", now)
 		}
@@ -709,7 +712,6 @@ func (r *StatefulSingletonReconciler) updateStatus(
 		// Clear timestamp when exiting transition phase
 		singleton.Status.TransitionTimestamp = nil
 		logger.Info("Clearing transition timestamp - exiting transition phase")
-		fmt.Printf("DEBUG: Clearing transition timestamp\n")
 	}
 
 	// Update status fields
