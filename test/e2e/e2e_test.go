@@ -1278,8 +1278,9 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			}, &ss)).To(Succeed())
 
 			Expect(ss.Status.Message).To(Equal("No pods found"))
-			Expect(ss.Status.TransitionTimestamp).NotTo(BeNil())
-			Expect(ss.Status.TransitionTimestamp.Time).To(BeTemporally(">=", startTime))
+			Expect(ss.Status.StatusTimestamp).NotTo(BeNil())
+			Expect(ss.Status.StatusTimestamp.Time).To(BeTemporally(">=", startTime))
+			Expect(ss.Status.TransitionTimestamp).To(BeNil()) // Should be nil when not transitioning
 
 			By("creating deployment and verifying status updates")
 			deployment := createDeployment(deploymentName, testNamespace, labels, "nginx:1.21", 1)
