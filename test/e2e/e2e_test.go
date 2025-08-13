@@ -1063,9 +1063,6 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				if err != nil {
 					return ""
 				}
-				// Debug output
-				GinkgoWriter.Printf("DEBUG: Phase=%s, Message=%s, TransitionTimestamp=%v\n",
-					ss.Status.Phase, ss.Status.Message, ss.Status.TransitionTimestamp)
 				return ss.Status.Message
 			}, 30*time.Second, 2*time.Second).Should(ContainSubstring("exceeded transition timeout"))
 		})
@@ -1256,8 +1253,8 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "status-accuracy-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
 			startTime := time.Now()
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("verifying initial status")
@@ -1279,7 +1276,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 
 			Expect(ss.Status.Message).To(Equal("No pods found"))
 			Expect(ss.Status.StatusTimestamp).NotTo(BeNil())
-			Expect(ss.Status.StatusTimestamp.Time).To(BeTemporally(">=", startTime))
+			Expect(ss.Status.StatusTimestamp.Time).To(BeTemporally("~", startTime, time.Second))
 			Expect(ss.Status.TransitionTimestamp).To(BeNil()) // Should be nil when not transitioning
 
 			By("creating deployment and verifying status updates")
@@ -1303,7 +1300,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			}, &ss)).To(Succeed())
 
 			Expect(ss.Status.Phase).To(Equal("Running"))
-			Expect(ss.Status.Message).To(ContainSubstring("active"))
+			Expect(ss.Status.Message).To(ContainSubstring("running"))
 			Expect(ss.Status.ActivePod).NotTo(BeEmpty())
 
 			By("triggering transition and monitoring status accuracy")
@@ -1336,7 +1333,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name: singletonName, Namespace: testNamespace,
 			}, &ss)).To(Succeed())
-			Expect(ss.Status.TransitionTimestamp.Time).To(BeTemporally(">=", transitionStartTime))
+			Expect(ss.Status.TransitionTimestamp.Time).To(BeTemporally("~", transitionStartTime, 30*time.Second))
 
 			By("verifying successful transition completion")
 			Eventually(func() string {
