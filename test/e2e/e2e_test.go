@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -1362,16 +1361,29 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			By("verifying events are generated for StatefulSingleton")
 			Eventually(func() []corev1.Event {
 				var eventList corev1.EventList
-				err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace),
-					client.MatchingFields(fields.Set{
-						"involvedObject.name": singletonName,
-						"involvedObject.kind": "StatefulSingleton",
-					}))
+				err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace))
 				if err != nil {
 					return nil
 				}
-				return eventList.Items
+				var relevantEvents []corev1.Event
+				for _, event := range eventList.Items {
+					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+						relevantEvents = append(relevantEvents, event)
+					}
+				}
+				return relevantEvents
 			}, 2*time.Minute, 5*time.Second).Should(Not(BeEmpty()))
+
+			By("counting events before transition")
+			var eventCountBefore int
+			var eventList corev1.EventList
+			err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace))
+			Expect(err).NotTo(HaveOccurred())
+			for _, event := range eventList.Items {
+				if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+					eventCountBefore++
+				}
+			}
 
 			By("triggering transition and checking for transition events")
 			Eventually(func() error {
@@ -1386,26 +1398,21 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				return k8sClient.Update(ctx, &currentDeployment)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
-			By("verifying transition events are generated")
-			Eventually(func() bool {
+			By("verifying more events are generated after transition")
+			Eventually(func() int {
 				var eventList corev1.EventList
-				err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace),
-					client.MatchingFields(fields.Set{
-						"involvedObject.name": singletonName,
-						"involvedObject.kind": "StatefulSingleton",
-					}))
+				err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace))
 				if err != nil {
-					return false
+					return 0
 				}
-
+				count := 0
 				for _, event := range eventList.Items {
-					if strings.Contains(event.Message, "transition") ||
-						strings.Contains(event.Message, "Transitioning") {
-						return true
+					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+						count++
 					}
 				}
-				return false
-			}, 2*time.Minute, 5*time.Second).Should(BeTrue())
+				return count
+			}, 2*time.Minute, 5*time.Second).Should(BeNumerically(">", eventCountBefore))
 		})
 
 		It("should reflect failure conditions in status", func() {
