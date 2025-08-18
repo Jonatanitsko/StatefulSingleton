@@ -345,11 +345,6 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 					Namespace: testNamespace,
 				},
 				Spec: appsv1.DeploymentSpec{
-					//Strategy: appsv1.DeploymentStrategy{
-					//	RollingUpdate: &appsv1.RollingUpdateDeployment{
-					//		MaxSurge: &intstr.IntOrString{IntVal: 0},
-					//	},
-					//},
 					Replicas: int32Ptr(1),
 					Selector: &metav1.LabelSelector{
 						MatchLabels: labels,
@@ -1561,7 +1556,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				client.InNamespace(testNamespace),
 				client.MatchingLabels(labels))).To(Succeed())
 			// Pods should still exist since they're controlled by the deployment
-			Expect(len(podList.Items)).To(BeNumerically(">", 0))
+			Expect(podList.Items).ToNot(BeEmpty())
 
 			// Cleanup
 			_ = k8sClient.Delete(ctx, deployment)
@@ -1693,7 +1688,8 @@ func int64Ptr(i int64) *int64 {
 }
 
 // createStatefulSingleton creates a StatefulSingleton with the given parameters
-func createStatefulSingleton(name, namespace string, labels map[string]string, gracePeriod, maxTransition int, respectPodGrace bool) *statefulsingleton.StatefulSingleton {
+func createStatefulSingleton(name, namespace string, labels map[string]string,
+	gracePeriod, maxTransition int, respectPodGrace bool) *statefulsingleton.StatefulSingleton {
 	return &statefulsingleton.StatefulSingleton{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1711,7 +1707,8 @@ func createStatefulSingleton(name, namespace string, labels map[string]string, g
 }
 
 // createDeployment creates a Deployment with the given parameters
-func createDeployment(name, namespace string, labels map[string]string, image string, replicas int32) *appsv1.Deployment {
+func createDeployment(name, namespace string, labels map[string]string, image string,
+	replicas int32) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1754,7 +1751,8 @@ func createDeployment(name, namespace string, labels map[string]string, image st
 }
 
 // cleanupTestResources cleans up test resources
-func cleanupTestResources(ctx context.Context, k8sClient client.Client, namespace, singletonName, deploymentName string) {
+func cleanupTestResources(ctx context.Context, k8sClient client.Client, namespace,
+	singletonName, deploymentName string) {
 	// Delete StatefulSingleton
 	if singletonName != "" {
 		ss := &statefulsingleton.StatefulSingleton{
