@@ -105,7 +105,7 @@ jobs:
  
       - name: Run E2E tests
         run: |
-          export KUBECONFIG="$(kind get kubeconfig-path --name statefulsingleton-e2e-${{ matrix.go-version }} || echo ~/.kube/config)"
+          export KUBECONFIG="$(kind get kubeconfig --name statefulsingleton-e2e-${{ matrix.go-version }} || echo ~/.kube/config)"
           CERT_MANAGER_INSTALL_SKIP=true ENABLE_WEBHOOKS=true make test-e2e
         env:
           ENABLE_WEBHOOKS: "true"
