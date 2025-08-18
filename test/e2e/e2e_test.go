@@ -40,6 +40,11 @@ import (
 	statefulsingleton "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 )
 
+const (
+	// StatefulSingletonKind represents the kind for StatefulSingleton resources
+	StatefulSingletonKind = "StatefulSingleton"
+)
+
 // E2E tests for StatefulSingleton operator
 // These tests run against a real cluster (Kind) with the operator deployed
 var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
@@ -623,7 +628,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			By("verifying the ConfigMap contains the wrapper script")
 			Expect(configMap.Data).To(HaveKey("entrypoint-wrapper.sh"))
 			wrapperScript := configMap.Data["entrypoint-wrapper.sh"]
-			Expect(wrapperScript).To(ContainSubstring("StatefulSingleton"))
+			Expect(wrapperScript).To(ContainSubstring(StatefulSingletonKind))
 			Expect(wrapperScript).To(ContainSubstring("start-signal"))
 			Expect(wrapperScript).To(ContainSubstring("ORIGINAL_ENTRYPOINT"))
 		})
@@ -760,7 +765,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "webhook-failure-test"}
 
 			By("creating StatefulSingleton and deployment first")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			deployment := createDeployment(deploymentName, testNamespace, labels, "nginx:1.21", 1)
@@ -829,12 +834,12 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			sharedLabels := map[string]string{"app": "shared", "tier": "web"}
 
 			By("creating first StatefulSingleton")
-			singleton1 := createStatefulSingleton("overlap-singleton-1", testNamespace, sharedLabels, 30, 60, true)
+			singleton1 := createStatefulSingleton("overlap-singleton-1", testNamespace, sharedLabels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton1)).To(Succeed())
 
 			By("creating second StatefulSingleton with overlapping selector")
 			overlapLabels := map[string]string{"app": "shared"} // Broader selector
-			singleton2 := createStatefulSingleton("overlap-singleton-2", testNamespace, overlapLabels, 30, 60, true)
+			singleton2 := createStatefulSingleton("overlap-singleton-2", testNamespace, overlapLabels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton2)).To(Succeed())
 
 			By("creating deployment with shared labels")
@@ -865,7 +870,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "existing-mods-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating pod with pre-existing volumes and sidecars")
@@ -957,7 +962,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "timeout-test"}
 
 			By("creating StatefulSingleton with very short transition timeout")
-			singleton := createStatefulSingleton(testSingletonName, testNamespace, labels, 30, 1, true) // 1 second timeout
+			singleton := createStatefulSingleton(testSingletonName, testNamespace, labels, 30, 1) // 1 second timeout
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating deployment with slow-terminating container")
@@ -1065,7 +1070,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "grace-respect-test"}
 
 			By("creating StatefulSingleton with RespectPodGracePeriod=true")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 10, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 10, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating deployment with longer grace period")
@@ -1113,7 +1118,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "multi-pod-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating deployment with multiple replicas")
@@ -1159,7 +1164,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "rapid-deploy-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating initial deployment")
@@ -1248,7 +1253,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 
 			By("creating StatefulSingleton")
 			startTime := time.Now()
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("verifying initial status")
@@ -1346,7 +1351,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "events-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating deployment")
@@ -1362,7 +1367,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				}
 				var relevantEvents []corev1.Event
 				for _, event := range eventList.Items {
-					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == StatefulSingletonKind {
 						relevantEvents = append(relevantEvents, event)
 					}
 				}
@@ -1375,7 +1380,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			err := k8sClient.List(ctx, &eventList, client.InNamespace(testNamespace))
 			Expect(err).NotTo(HaveOccurred())
 			for _, event := range eventList.Items {
-				if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+				if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == StatefulSingletonKind {
 					eventCountBefore++
 				}
 			}
@@ -1402,7 +1407,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				}
 				count := 0
 				for _, event := range eventList.Items {
-					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == "StatefulSingleton" {
+					if event.InvolvedObject.Name == singletonName && event.InvolvedObject.Kind == StatefulSingletonKind {
 						count++
 					}
 				}
@@ -1415,7 +1420,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 
 			By("creating StatefulSingleton with impossible selector")
 			impossibleLabels := map[string]string{"app": "nonexistent", "impossible": "true"}
-			singleton := createStatefulSingleton(singletonName, testNamespace, impossibleLabels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, impossibleLabels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("verifying status reflects no matching pods")
@@ -1501,7 +1506,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "cleanup-test"}
 
 			By("creating StatefulSingleton and deployment")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			deployment := createDeployment(deploymentName, testNamespace, labels, "nginx:1.21", 1)
@@ -1566,7 +1571,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "configmap-lifecycle-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("verifying ConfigMap is created")
@@ -1591,7 +1596,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 
 			By("verifying ConfigMap content is restored")
 			Expect(configMap.Data).To(HaveKey("entrypoint-wrapper.sh"))
-			Expect(configMap.Data["entrypoint-wrapper.sh"]).To(ContainSubstring("StatefulSingleton"))
+			Expect(configMap.Data["entrypoint-wrapper.sh"]).To(ContainSubstring(StatefulSingletonKind))
 			Expect(configMap.ResourceVersion).NotTo(Equal(originalResourceVersion))
 
 			// Cleanup
@@ -1602,7 +1607,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			labels := map[string]string{"app": "orphan-test"}
 
 			By("creating StatefulSingleton")
-			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60, true)
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
 			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
 
 			By("creating deployment")
@@ -1689,7 +1694,7 @@ func int64Ptr(i int64) *int64 {
 
 // createStatefulSingleton creates a StatefulSingleton with the given parameters
 func createStatefulSingleton(name, namespace string, labels map[string]string,
-	gracePeriod, maxTransition int, respectPodGrace bool) *statefulsingleton.StatefulSingleton {
+	gracePeriod, maxTransition int) *statefulsingleton.StatefulSingleton {
 	return &statefulsingleton.StatefulSingleton{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1701,7 +1706,7 @@ func createStatefulSingleton(name, namespace string, labels map[string]string,
 			},
 			TerminationGracePeriod: gracePeriod,
 			MaxTransitionTime:      maxTransition,
-			RespectPodGracePeriod:  respectPodGrace,
+			RespectPodGracePeriod:  true,
 		},
 	}
 }
