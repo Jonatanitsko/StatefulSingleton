@@ -158,6 +158,9 @@ func (r *PodDefaulter) mutatePodSpec(pod *corev1.Pod, singleton *appsv1.Stateful
 	// Add status sidecar if not already present
 	r.addStatusSidecar(pod)
 
+	// Add antiaffinity so new pod created by stss will be always scheduled on new node.
+	r.addAntiAffinity(pod)
+
 	// Add annotation to track that we've modified this pod
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
@@ -320,6 +323,64 @@ func (r *PodDefaulter) addStatusSidecar(pod *corev1.Pod) {
 		},
 	}
 	pod.Spec.Containers = append(pod.Spec.Containers, statusSidecar)
+}
+
+
+func (r *PodDefaulter) addAntiAffinity(pod *corev1.Pod) {
+	// Initialize affinity if it doesn't exist
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &corev1.Affinity{}
+	}
+	if pod.Spec.Affinity.PodAntiAffinity == nil {
+		pod.Spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+
+	// Check if anti-affinity rule already exists for StatefulSingleton pods
+	antiAffinityExists := false
+	for _, affinity := range pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+		if affinity.PodAffinityTerm.TopologyKey == "kubernetes.io/hostname" &&
+			affinity.PodAffinityTerm.LabelSelector != nil {
+			// Check if this is our StatefulSingleton anti-affinity rule
+			for _, expr := range affinity.PodAffinityTerm.LabelSelector.MatchExpressions {
+				if expr.Key == "apps.statefulsingleton.com/managed" && expr.Operator == metav1.LabelSelectorOpIn {
+					antiAffinityExists = true
+					break
+				}
+			}
+			if antiAffinityExists {
+				break
+			}
+		}
+	}
+
+	// If anti-affinity doesn't exist, add it
+	if !antiAffinityExists {
+		affinityTerm := corev1.WeightedPodAffinityTerm{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				TopologyKey: "kubernetes.io/hostname",
+				LabelSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{
+							Key:      "apps.statefulsingleton.com/managed",
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{"true"},
+						},
+					},
+				},
+			},
+		}
+		pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+			affinityTerm,
+		)
+	}
+
+	// Ensure the pod has the required label for anti-affinity to work
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels["apps.statefulsingleton.com/managed"] = "true"
 }
 
 // SetupWithManager sets up the webhook with the Manager
