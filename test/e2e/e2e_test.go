@@ -1681,6 +1681,342 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			cleanupTestResources(ctx, k8sClient, testNamespace, singletonName, deploymentName)
 		})
 	})
+
+	// 5. Anti-Affinity
+	Context("Pod Anti-Affinity Scheduling", func() {
+		var (
+			singletonName  = "anti-affinity-singleton"
+			deploymentName = "anti-affinity-deployment"
+		)
+
+		AfterEach(func() {
+			cleanupTestResources(ctx, k8sClient, testNamespace, singletonName, deploymentName)
+		})
+
+		It("should add anti-affinity rules to StatefulSingleton managed pods", func() {
+			labels := map[string]string{
+				"app": "anti-affinity-test",
+			}
+
+			By("creating a StatefulSingleton")
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("creating a deployment with matching labels")
+			deployment := createDeployment(deploymentName, testNamespace, labels, "nginx:1.21", 1)
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+			By("waiting for the pod to be created and managed")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.ActivePod
+			}, 2*time.Minute, 5*time.Second).ShouldNot(BeEmpty())
+
+			By("verifying the pod has anti-affinity rules applied by the webhook")
+			var pod corev1.Pod
+			Eventually(func() error {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return err
+				}
+				if ss.Status.ActivePod == "" {
+					return fmt.Errorf("no active pod yet")
+				}
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name: ss.Status.ActivePod, Namespace: testNamespace,
+				}, &pod)
+			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+
+			// Verify anti-affinity was added by webhook
+			Expect(pod.Spec.Affinity).NotTo(BeNil(), "Pod should have affinity rules")
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil(), "Pod should have pod anti-affinity")
+
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).NotTo(BeEmpty(), "Should have preferred anti-affinity rules")
+
+			// Find the anti-affinity rule for StatefulSingleton managed pods
+			var antiAffinityRule *corev1.WeightedPodAffinityTerm
+			for i := range preferredRules {
+				if preferredRules[i].PodAffinityTerm.TopologyKey == "kubernetes.io/hostname" {
+					antiAffinityRule = &preferredRules[i]
+					break
+				}
+			}
+
+			Expect(antiAffinityRule).NotTo(BeNil(), "Should have hostname topology anti-affinity rule")
+			Expect(antiAffinityRule.Weight).To(Equal(int32(100)), "Rule should have weight 100")
+
+			// Verify label selector
+			Expect(antiAffinityRule.PodAffinityTerm.LabelSelector).NotTo(BeNil())
+			Expect(antiAffinityRule.PodAffinityTerm.LabelSelector.MatchExpressions).To(HaveLen(1))
+
+			expr := antiAffinityRule.PodAffinityTerm.LabelSelector.MatchExpressions[0]
+			Expect(expr.Key).To(Equal("apps.statefulsingleton.com/managed"))
+			Expect(expr.Operator).To(Equal(metav1.LabelSelectorOpIn))
+			Expect(expr.Values).To(Equal([]string{"true"}))
+
+			By("verifying the pod has the management label")
+			Expect(pod.Labels).To(HaveKeyWithValue("apps.statefulsingleton.com/managed", "true"))
+		})
+
+		It("should schedule new pods on different nodes when multiple nodes are available", func() {
+			By("checking if cluster has multiple nodes")
+			var nodeList corev1.NodeList
+			err := k8sClient.List(ctx, &nodeList)
+			Expect(err).NotTo(HaveOccurred())
+
+			if len(nodeList.Items) < 2 {
+				Skip("Test requires multiple nodes for anti-affinity scheduling verification")
+			}
+
+			labels := map[string]string{
+				"app": "multi-node-anti-affinity",
+			}
+
+			By("creating a StatefulSingleton")
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("creating first deployment")
+			deployment1 := createDeployment("first-deployment", testNamespace, labels, "nginx:1.21", 1)
+			Expect(k8sClient.Create(ctx, deployment1)).To(Succeed())
+
+			By("waiting for first pod to be scheduled")
+			var firstPodNode string
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil || ss.Status.ActivePod == "" {
+					return ""
+				}
+
+				var pod corev1.Pod
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name: ss.Status.ActivePod, Namespace: testNamespace,
+				}, &pod)
+				if err != nil {
+					return ""
+				}
+				firstPodNode = pod.Spec.NodeName
+				return firstPodNode
+			}, 2*time.Minute, 5*time.Second).ShouldNot(BeEmpty())
+
+			By("creating second deployment to trigger rolling update")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name: "first-deployment", Namespace: testNamespace,
+				}, deployment1)
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			deployment1.Spec.Template.Spec.Containers[0].Image = "nginx:1.22"
+			Eventually(func() error {
+				return k8sClient.Update(ctx, deployment1)
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			By("waiting for new pod to be scheduled on a different node")
+			Eventually(func() bool {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil || ss.Status.ActivePod == "" {
+					return false
+				}
+
+				var pod corev1.Pod
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name: ss.Status.ActivePod, Namespace: testNamespace,
+				}, &pod)
+				if err != nil || pod.Spec.NodeName == "" {
+					return false
+				}
+
+				// Verify the new pod is scheduled on a different node (anti-affinity working)
+				return pod.Spec.NodeName != firstPodNode
+			}, 3*time.Minute, 10*time.Second).Should(BeTrue(), "New pod should be scheduled on different node due to anti-affinity")
+
+			// Cleanup
+			_ = k8sClient.Delete(ctx, deployment1)
+		})
+
+		It("should handle anti-affinity when node resources are constrained", func() {
+			labels := map[string]string{
+				"app": "resource-constrained-test",
+			}
+
+			By("creating a StatefulSingleton")
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("creating deployment with high resource requirements")
+			highResourceDeployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:    "nginx",
+									Image:   "nginx:1.21",
+									Command: []string{"nginx", "-g", "daemon off;"},
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceMemory: resource.MustParse("128Mi"),
+											corev1.ResourceCPU:    resource.MustParse("100m"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceMemory: resource.MustParse("256Mi"),
+											corev1.ResourceCPU:    resource.MustParse("200m"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, highResourceDeployment)).To(Succeed())
+
+			By("verifying pod is scheduled despite anti-affinity constraints")
+			Eventually(func() string {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil {
+					return ""
+				}
+				return ss.Status.Phase
+			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
+
+			By("verifying the pod has anti-affinity rules even with resource constraints")
+			var pod corev1.Pod
+			Eventually(func() error {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil || ss.Status.ActivePod == "" {
+					return fmt.Errorf("no active pod")
+				}
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name: ss.Status.ActivePod, Namespace: testNamespace,
+				}, &pod)
+			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+
+			Expect(pod.Spec.Affinity).NotTo(BeNil())
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil())
+			Expect(pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution).NotTo(BeEmpty())
+		})
+
+		It("should preserve existing affinity rules while adding anti-affinity", func() {
+			labels := map[string]string{
+				"app": "existing-affinity-test",
+			}
+
+			By("creating a StatefulSingleton")
+			singleton := createStatefulSingleton(singletonName, testNamespace, labels, 30, 60)
+			Expect(k8sClient.Create(ctx, singleton)).To(Succeed())
+
+			By("creating deployment with existing node affinity")
+			deploymentWithAffinity := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deploymentName,
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: int32Ptr(1),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: corev1.PodSpec{
+							Affinity: &corev1.Affinity{
+								NodeAffinity: &corev1.NodeAffinity{
+									PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{
+										{
+											Weight: 50,
+											Preference: corev1.NodeSelectorTerm{
+												MatchExpressions: []corev1.NodeSelectorRequirement{
+													{
+														Key:      "kubernetes.io/arch",
+														Operator: corev1.NodeSelectorOpIn,
+														Values:   []string{"amd64"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+							Containers: []corev1.Container{
+								{
+									Name:    "nginx",
+									Image:   "nginx:1.21",
+									Command: []string{"nginx", "-g", "daemon off;"},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deploymentWithAffinity)).To(Succeed())
+
+			By("verifying pod has both existing node affinity and new pod anti-affinity")
+			var pod corev1.Pod
+			Eventually(func() error {
+				var ss statefulsingleton.StatefulSingleton
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: singletonName, Namespace: testNamespace,
+				}, &ss)
+				if err != nil || ss.Status.ActivePod == "" {
+					return fmt.Errorf("no active pod")
+				}
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name: ss.Status.ActivePod, Namespace: testNamespace,
+				}, &pod)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			// Should have both node affinity and pod anti-affinity
+			Expect(pod.Spec.Affinity).NotTo(BeNil())
+			Expect(pod.Spec.Affinity.NodeAffinity).NotTo(BeNil(), "Original node affinity should be preserved")
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil(), "Pod anti-affinity should be added")
+
+			// Verify original node affinity is preserved
+			nodeAffinityRules := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(nodeAffinityRules).To(HaveLen(1))
+			Expect(nodeAffinityRules[0].Weight).To(Equal(int32(50)))
+
+			// Verify anti-affinity was added
+			antiAffinityRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(antiAffinityRules).To(HaveLen(1))
+			Expect(antiAffinityRules[0].PodAffinityTerm.TopologyKey).To(Equal("kubernetes.io/hostname"))
+		})
+	})
 })
 
 // Helper functions

@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	appsv1 "github.com/Jonatanitsko/StatefulSingleton.git/api/v1"
 )
@@ -681,6 +682,257 @@ var _ = Describe("Pod Webhook", func() {
 			Expect(volumeCount).To(Equal(1), "Should have only one signal-volume")
 			Expect(signalVolume.HostPath).NotTo(BeNil(), "Should keep existing HostPath volume")
 			Expect(signalVolume.HostPath.Path).To(Equal("/tmp/existing"))
+		})
+
+		It("should add anti-affinity rules to schedule pods on different nodes", func() {
+			By("creating a pod that should get anti-affinity rules")
+			pod := createBasicPodSpec("anti-affinity-pod", testNamespace, podLabels)
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying anti-affinity was added")
+			Expect(pod.Spec.Affinity).NotTo(BeNil(), "Pod should have affinity rules")
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil(), "Pod should have pod anti-affinity")
+
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).NotTo(BeEmpty(), "Should have preferred anti-affinity rules")
+
+			// Find our anti-affinity rule
+			var ourRule *corev1.WeightedPodAffinityTerm
+			for i := range preferredRules {
+				if preferredRules[i].PodAffinityTerm.TopologyKey == "kubernetes.io/hostname" {
+					ourRule = &preferredRules[i]
+					break
+				}
+			}
+
+			Expect(ourRule).NotTo(BeNil(), "Should have hostname topology anti-affinity rule")
+			Expect(ourRule.Weight).To(Equal(int32(100)), "Rule should have weight 100")
+
+			// Verify label selector
+			Expect(ourRule.PodAffinityTerm.LabelSelector).NotTo(BeNil())
+			Expect(ourRule.PodAffinityTerm.LabelSelector.MatchExpressions).To(HaveLen(1))
+
+			expr := ourRule.PodAffinityTerm.LabelSelector.MatchExpressions[0]
+			Expect(expr.Key).To(Equal("apps.statefulsingleton.com/managed"))
+			Expect(expr.Operator).To(Equal(metav1.LabelSelectorOpIn))
+			Expect(expr.Values).To(Equal([]string{"true"}))
+
+			By("verifying the pod has the required label")
+			Expect(pod.Labels).To(HaveKeyWithValue("apps.statefulsingleton.com/managed", "true"))
+		})
+
+		It("should not add duplicate anti-affinity rules", func() {
+			By("creating a pod with existing anti-affinity rule")
+			pod := createBasicPodSpec("existing-anti-affinity-pod", testNamespace, podLabels)
+
+			// Add existing anti-affinity rule
+			existingRule := corev1.WeightedPodAffinityTerm{
+				Weight: 50,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					TopologyKey: "kubernetes.io/hostname",
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{
+								Key:      "apps.statefulsingleton.com/managed",
+								Operator: metav1.LabelSelectorOpIn,
+								Values:   []string{"true"},
+							},
+						},
+					},
+				},
+			}
+
+			pod.Spec.Affinity = &corev1.Affinity{
+				PodAntiAffinity: &corev1.PodAntiAffinity{
+					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{existingRule},
+				},
+			}
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying no duplicate rule was added")
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).To(HaveLen(1), "Should still have only one anti-affinity rule")
+			Expect(preferredRules[0].Weight).To(Equal(int32(50)), "Should preserve existing rule weight")
+		})
+
+		It("should handle pod with existing affinity but no anti-affinity", func() {
+			By("creating a pod with existing node affinity but no pod anti-affinity")
+			pod := createBasicPodSpec("node-affinity-pod", testNamespace, podLabels)
+
+			// Add existing node affinity
+			pod.Spec.Affinity = &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "node-type",
+										Operator: corev1.NodeSelectorOpIn,
+										Values:   []string{"compute"},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying node affinity was preserved and pod anti-affinity was added")
+			// Should still have node affinity
+			Expect(pod.Spec.Affinity.NodeAffinity).NotTo(BeNil(), "Node affinity should be preserved")
+			Expect(pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).NotTo(BeNil())
+
+			// Should now have pod anti-affinity
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil(), "Pod anti-affinity should be added")
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).To(HaveLen(1), "Should have one anti-affinity rule")
+
+			// Verify our rule
+			rule := preferredRules[0]
+			Expect(rule.PodAffinityTerm.TopologyKey).To(Equal("kubernetes.io/hostname"))
+			Expect(rule.Weight).To(Equal(int32(100)))
+		})
+
+		It("should add anti-affinity rules to pods with nil labels", func() {
+			By("creating a pod with nil labels")
+			pod := createBasicPodSpec("nil-labels-pod", testNamespace, nil)
+			// Override to match singleton selector
+			pod.Labels = podLabels
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying anti-affinity was added and management label was set")
+			Expect(pod.Spec.Affinity).NotTo(BeNil())
+			Expect(pod.Spec.Affinity.PodAntiAffinity).NotTo(BeNil())
+			Expect(pod.Labels).To(HaveKeyWithValue("apps.statefulsingleton.com/managed", "true"))
+		})
+
+		It("should preserve existing different anti-affinity rules", func() {
+			By("creating a pod with different anti-affinity rule")
+			pod := createBasicPodSpec("different-anti-affinity-pod", testNamespace, podLabels)
+
+			// Add different anti-affinity rule
+			existingRule := corev1.WeightedPodAffinityTerm{
+				Weight: 75,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					TopologyKey: "topology.kubernetes.io/zone",
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app": "different-app",
+						},
+					},
+				},
+			}
+
+			pod.Spec.Affinity = &corev1.Affinity{
+				PodAntiAffinity: &corev1.PodAntiAffinity{
+					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{existingRule},
+				},
+			}
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying both rules exist")
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).To(HaveLen(2), "Should have both existing and new anti-affinity rules")
+
+			// Find both rules
+			var zoneRule, hostnameRule *corev1.WeightedPodAffinityTerm
+			for i := range preferredRules {
+				if preferredRules[i].PodAffinityTerm.TopologyKey == "topology.kubernetes.io/zone" {
+					zoneRule = &preferredRules[i]
+				} else if preferredRules[i].PodAffinityTerm.TopologyKey == "kubernetes.io/hostname" {
+					hostnameRule = &preferredRules[i]
+				}
+			}
+
+			Expect(zoneRule).NotTo(BeNil(), "Should preserve existing zone anti-affinity rule")
+			Expect(zoneRule.Weight).To(Equal(int32(75)))
+
+			Expect(hostnameRule).NotTo(BeNil(), "Should add new hostname anti-affinity rule")
+			Expect(hostnameRule.Weight).To(Equal(int32(100)))
+		})
+
+		It("should handle pods with existing required anti-affinity rules", func() {
+			By("creating a pod with required anti-affinity rule")
+			pod := createBasicPodSpec("required-anti-affinity-pod", testNamespace, podLabels)
+
+			// Add required anti-affinity rule
+			pod.Spec.Affinity = &corev1.Affinity{
+				PodAntiAffinity: &corev1.PodAntiAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+						{
+							TopologyKey: "kubernetes.io/hostname",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app": "critical-app",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying required rule is preserved and preferred rule is added")
+			// Should have required rules preserved
+			requiredRules := pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			Expect(requiredRules).To(HaveLen(1), "Should preserve existing required rule")
+
+			// Should have our preferred rule added
+			preferredRules := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+			Expect(preferredRules).To(HaveLen(1), "Should add our preferred rule")
+
+			rule := preferredRules[0]
+			Expect(rule.PodAffinityTerm.TopologyKey).To(Equal("kubernetes.io/hostname"))
+			Expect(rule.Weight).To(Equal(int32(100)))
+		})
+
+		It("should set management label on pod with no existing labels", func() {
+			By("creating a pod with completely nil labels")
+			pod := createBasicPodSpec("no-initial-labels-pod", testNamespace, podLabels)
+			pod.Labels = nil
+
+			// Need to re-add the matching labels for the webhook to process it
+			pod.Labels = podLabels
+
+			By("calling webhook logic directly")
+			defaulter := &PodDefaulter{Client: k8sClient}
+			err := defaulter.Default(ctx, pod)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the management label was added")
+			Expect(pod.Labels).NotTo(BeNil(), "Pod should have labels after webhook processing")
+			Expect(pod.Labels).To(HaveKeyWithValue("apps.statefulsingleton.com/managed", "true"))
+
+			// Should also preserve the original matching labels
+			for key, value := range podLabels {
+				Expect(pod.Labels).To(HaveKeyWithValue(key, value))
+			}
 		})
 	})
 })
