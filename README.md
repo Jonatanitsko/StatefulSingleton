@@ -13,6 +13,9 @@ The StatefulSingleton operator ensures zero downtime for critical stateful appli
 - **Minimal Downtime**: Optimizes transition process to minimize gaps between instances
 - **Standard Integration**: Works with standard Kubernetes Deployments and StatefulSets
 - **No Application Changes**: Operates without requiring modifications to application code
+- **Smart Pod Placement**: Automatically schedules new pods on different nodes than old pods for better availability
+- **Automatic Pod Injection**: Uses webhooks to transparently modify pods without changing your deployment files
+- **Tested & Reliable**: Comprehensive unit and end-to-end tests ensure it works as expected
 
 ## Architecture and Components
 
@@ -115,15 +118,27 @@ This flow ensures there is never a moment when both pods are running their main 
 
 ### Installation
 
-```bash
-# Install CRDs
-kubectl apply -f config/crd/bases/apps.openshift.statefulsingleton.com_statefulsingleton.yaml
+#### Easy Way (Recommended)
 
-# Install RBAC
+```bash
+# Install everything at once
+kubectl apply -k config/default
+```
+
+#### Step by Step
+
+```bash
+# Install the custom resource definitions
+kubectl apply -f config/crd/bases/
+
+# Set up permissions
 kubectl apply -f config/rbac/
 
+# Install the webhook
+kubectl apply -f config/webhook/
+
 # Deploy the operator
-kubectl apply -f config/manager/manager.yaml
+kubectl apply -f config/manager/
 ```
 
 ### Usage
@@ -184,6 +199,37 @@ The StatefulSingleton CRD supports the following configuration options:
 | `spec.maxTransitionTime` | Maximum time (seconds) for a transition | 300 |
 | `spec.respectPodGracePeriod` | Whether to use pod's grace period if longer | true |
 
+### What Happens to Your Pods
+
+When you create a StatefulSingleton, the operator automatically modifies matching pods behind the scenes. Here's what gets added:
+
+#### Readiness Control
+- Adds a special readiness gate (`apps.statefulsingleton.com/singleton-ready`)
+- This prevents the pod from getting traffic until the operator says it's safe
+
+#### Smart Scheduling
+- Adds anti-affinity rules so new pods would be scheduled to different nodes than old ones
+- Uses hostname-based topology (each node gets preference)
+- High priority (weight 100) but not required (so it still works on single-node clusters)
+
+#### Communication Setup
+- Creates a shared volume at `/var/run/signal` for the operator to signal when to start
+- Mounts wrapper scripts at `/opt/wrapper` that control your app's startup, warpping the original code and entrypoints
+
+#### Helper Container
+- Adds a sidecar container called `status-sidecar`
+- Uses minimal resources (10m CPU, 32Mi memory)
+- Helps manage the startup signals
+
+#### Your App Container
+- The webhook replaces your app's startup command with a wrapper script
+- Saves your original command in an environment variable
+- The wrapper waits for the operator's "go" signal before starting your app
+
+#### Labels for Tracking
+- Adds `apps.statefulsingleton.com/managed=true` label
+- This is how the operator and anti-affinity rules identify managed pods
+
 ## Monitoring and Troubleshooting
 
 ### Checking Status
@@ -215,9 +261,19 @@ kubectl logs -f deployment/statefulsingleton-controller-manager -c manager
    kubectl exec -it <pod-name> -c status-sidecar -- ls -la /var/run/signal/
    ```
 
-3. **Wrapper Script Issues**: Inspect the wrapper script log:
+3. **Wrapper Script Issues**: Check what the wrapper script is doing:
    ```bash
    kubectl logs <pod-name> -c <main-container> | grep StatefulSingleton
+   ```
+
+4. **Pod Placement Issues**: See if anti-affinity is working:
+   ```bash
+   kubectl get pod <pod-name> -o jsonpath='{.spec.affinity.podAntiAffinity}'
+   ```
+
+5. **Management Labels Missing**: Make sure the pod got the right labels:
+   ```bash
+   kubectl get pod <pod-name> --show-labels | grep managed
    ```
 
 ## Design Considerations
@@ -234,9 +290,136 @@ The mutating webhook allows us to transparently modify pods at creation time wit
 
 The operator respects the termination grace period to allow applications to shut down cleanly. This is essential for stateful applications to flush data, close connections, and perform cleanup operations.
 
+## Development & Testing
+
+### What You Need to Develop
+
+- Go 1.19 or newer
+- Docker for building images
+- kubectl to talk to your cluster
+- Kind for local testing (optional but recommended)
+- Ginkgo test framework
+
+### Building the Project
+
+```bash
+# Build the operator binary
+make build
+
+# Build and push a Docker image
+make docker-build docker-push IMG=your-registry/statefulsingleton:latest
+```
+
+### Running Tests
+
+#### Unit Tests (Fast)
+
+```bash
+# Run all unit tests
+make test
+
+# Test just the webhook logic
+go test ./internal/webhook/v1/
+```
+
+#### End-to-End Tests (Slower but thorough)
+
+```bash
+# Install Ginkgo if you don't have it
+go install github.com/onsi/ginkgo/v2/ginkgo@latest
+
+# Run all E2E tests (needs a real cluster)
+make test-e2e
+
+# Run just the anti-affinity tests
+ginkgo -focus "Anti-Affinity" test/e2e/
+```
+
+### Local Development
+
+```bash
+# Install the CRDs in your cluster
+make install
+
+# Run the operator on your machine (points to your current kubectl context)
+make run
+
+# In another terminal, try it out
+kubectl apply -f config/samples/
+```
+
+### What Gets Tested
+
+We have pretty comprehensive tests:
+
+- **Unit Tests**: The webhook logic, anti-affinity rules, pod modifications
+- **E2E Tests**: The whole thing working together:
+  - Basic functionality (pods start and stop correctly)
+  - Rolling updates (old pod stops, new pod starts)
+  - Anti-affinity (new pods go to different nodes when possible)
+  - Multi-node scenarios
+  - What happens when resources are tight
+  - Webhook integration
+  - Error cases and edge conditions
+
+## How It Actually Works
+
+### The Startup Dance
+
+The operator uses a clever signal system:
+
+1. **Wrapper Takes Over**: Your pod starts with our wrapper script instead of your app
+2. **Waiting Game**: The wrapper polls for a "start-signal" file every 10 seconds
+3. **Green Light**: When the operator creates the signal file, your app finally starts
+4. **Back to Normal**: Your app runs with its original command and arguments
+
+### ConfigMap Magic
+
+The operator manages ConfigMaps with the wrapper scripts:
+
+- **Name**: `statefulsingleton-wrapper` in each namespace
+- **Contents**: Shell scripts that do the startup control
+- **Lifecycle**: The controller creates and updates these automatically
+- **Permissions**: Scripts are executable (chmod 755)
+
+### Anti-Affinity Deep Dive
+
+We automatically add these rules to spread pods across nodes:
+
+```yaml
+spec:
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+            - key: apps.statefulsingleton.com/managed
+              operator: In
+              values: ["true"]
+```
+
+**Why This Rocks**:
+- Better uptime (not all eggs in one basket)
+- Spreads load across your cluster
+- Rolling updates are smoother
+- Less impact when nodes go down
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Want to help make this better? Awesome!
+
+### How to Contribute
+
+1. **Add Tests**: New features need tests (both unit and E2E when possible)
+2. **Update Docs**: If you add features, update this README
+3. **Follow Conventions**: Run `make fmt vet` to keep code clean
+4. **Test Everything**: Make sure E2E tests pass for big changes
+5. **Don't Break Things**: Keep backward compatibility with existing setups
+
+Feel free to open issues for bugs or feature requests, and pull requests are always welcome!
 
 ## License
 
