@@ -120,7 +120,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - OPERATOR_INSTALL= true
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	go test ./test/e2e/ -v -ginkgo.v
+	go test ./test/e2e/ -v -ginkgo.v -timeout=30m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

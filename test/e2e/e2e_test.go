@@ -43,6 +43,8 @@ import (
 const (
 	// StatefulSingletonKind represents the kind for StatefulSingleton resources
 	StatefulSingletonKind = "StatefulSingleton"
+	// nginxImageV122 nginx image version used in tests
+	nginxImageV122 = "nginx:1.22"
 )
 
 // E2E tests for StatefulSingleton operator
@@ -1184,7 +1186,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 			}, 2*time.Minute, 5*time.Second).Should(Equal("Running"))
 
 			By("performing rapid image updates")
-			images := []string{"nginx:1.21", "nginx:1.22", "nginx:1.23", "nginx:alpine"}
+			images := []string{"nginx:1.21", nginxImageV122, "nginx:1.23", "nginx:alpine"}
 
 			for _, image := range images {
 				Eventually(func() error {
@@ -1312,7 +1314,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				if err != nil {
 					return err
 				}
-				currentDeployment.Spec.Template.Spec.Containers[0].Image = "nginx:1.22"
+				currentDeployment.Spec.Template.Spec.Containers[0].Image = nginxImageV122
 				return k8sClient.Update(ctx, &currentDeployment)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
@@ -1394,7 +1396,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				if err != nil {
 					return err
 				}
-				currentDeployment.Spec.Template.Spec.Containers[0].Image = "nginx:1.22"
+				currentDeployment.Spec.Template.Spec.Containers[0].Image = nginxImageV122
 				return k8sClient.Update(ctx, &currentDeployment)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
@@ -1819,7 +1821,7 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 				}, deployment1)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
-			deployment1.Spec.Template.Spec.Containers[0].Image = "nginx:1.22"
+			deployment1.Spec.Template.Spec.Containers[0].Image = nginxImageV122
 			Eventually(func() error {
 				return k8sClient.Update(ctx, deployment1)
 			}, 30*time.Second, 2*time.Second).Should(Succeed())
@@ -1844,7 +1846,8 @@ var _ = Describe("StatefulSingleton E2E Tests", Ordered, func() {
 
 				// Verify the new pod is scheduled on a different node (anti-affinity working)
 				return pod.Spec.NodeName != firstPodNode
-			}, 3*time.Minute, 10*time.Second).Should(BeTrue(), "New pod should be scheduled on different node due to anti-affinity")
+			}, 3*time.Minute, 10*time.Second).Should(BeTrue(),
+				"New pod should be scheduled on different node due to anti-affinity")
 
 			// Cleanup
 			_ = k8sClient.Delete(ctx, deployment1)

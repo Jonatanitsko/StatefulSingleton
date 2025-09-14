@@ -47,6 +47,7 @@ const (
 	signalVolumeName           = "signal-volume"
 	wrapperScriptsVolumeName   = "wrapper-scripts"
 	statusSidecarContainerName = "status-sidecar"
+	hostnameTopologyKey        = "kubernetes.io/hostname"
 )
 
 // +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,sideEffects=None,admissionReviewVersions=v1
@@ -223,7 +224,7 @@ func (r *PodDefaulter) modifyContainers(pod *corev1.Pod) {
 		}
 
 		// Capture original entrypoint
-		originalEntrypoint := map[string]interface{}{
+		originalEntrypoint := map[string]any{
 			"command": container.Command,
 			"args":    container.Args,
 			"image":   container.Image,
@@ -325,7 +326,6 @@ func (r *PodDefaulter) addStatusSidecar(pod *corev1.Pod) {
 	pod.Spec.Containers = append(pod.Spec.Containers, statusSidecar)
 }
 
-
 func (r *PodDefaulter) addAntiAffinity(pod *corev1.Pod) {
 	// Initialize affinity if it doesn't exist
 	if pod.Spec.Affinity == nil {
@@ -338,7 +338,7 @@ func (r *PodDefaulter) addAntiAffinity(pod *corev1.Pod) {
 	// Check if anti-affinity rule already exists for StatefulSingleton pods
 	antiAffinityExists := false
 	for _, affinity := range pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
-		if affinity.PodAffinityTerm.TopologyKey == "kubernetes.io/hostname" &&
+		if affinity.PodAffinityTerm.TopologyKey == hostnameTopologyKey &&
 			affinity.PodAffinityTerm.LabelSelector != nil {
 			// Check if this is our StatefulSingleton anti-affinity rule
 			for _, expr := range affinity.PodAffinityTerm.LabelSelector.MatchExpressions {
@@ -358,7 +358,7 @@ func (r *PodDefaulter) addAntiAffinity(pod *corev1.Pod) {
 		affinityTerm := corev1.WeightedPodAffinityTerm{
 			Weight: 100,
 			PodAffinityTerm: corev1.PodAffinityTerm{
-				TopologyKey: "kubernetes.io/hostname",
+				TopologyKey: hostnameTopologyKey,
 				LabelSelector: &metav1.LabelSelector{
 					MatchExpressions: []metav1.LabelSelectorRequirement{
 						{
