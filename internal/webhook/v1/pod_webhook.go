@@ -223,7 +223,7 @@ func (r *PodDefaulter) modifyContainers(pod *corev1.Pod) {
 			continue
 		}
 
-		// Capture original entrypoint
+		// Capture original entrypointI
 		originalEntrypoint := map[string]any{
 			"command": container.Command,
 			"args":    container.Args,

@@ -8,19 +8,30 @@ metadata:
           "apiVersion": "apps.statefulsingleton.com/v1",
           "kind": "StatefulSingleton",
           "metadata": {
-            "name": "example-singleton"
+            "labels": {
+              "app.kubernetes.io/created-by": "stateful-singleton",
+              "app.kubernetes.io/instance": "statefulsingleton-sample",
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "statefulsingleton",
+              "app.kubernetes.io/part-of": "stateful-singleton"
+            },
+            "name": "statefulsingleton-sample"
           },
           "spec": {
+            "maxTransitionTime": 300,
+            "respectPodGracePeriod": true,
             "selector": {
               "matchLabels": {
-                "app": "my-app"
+                "app": "statefulsingleton-sample"
               }
-            }
+            },
+            "terminationGracePeriod": 120
           }
         }
       ]
     capabilities: Basic Install
     categories: Application Runtime
+    createdAt: "2025-09-16T06:56:10Z"
     description: Manages controlled transitions for stateful singleton applications
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
@@ -32,6 +43,8 @@ metadata:
     operatorframework.io/arch.amd64: supported
     operatorframework.io/arch.arm64: supported
     operatorframework.io/os.linux: supported
+    operators.operatorframework.io/builder: operator-sdk-v1.40.0
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: stateful-singleton.v0.0.1
   namespace: placeholder
 spec:
@@ -108,6 +121,39 @@ spec:
           - patch
           - update
         - apiGroups:
+          - ""
+          resources:
+          - replicationcontrollers
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - replicasets
+          verbs:
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - apps.openshift.io
+          resources:
+          - deploymentconfigs
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - apps.statefulsingleton.com
           resources:
           - statefulsingletons
@@ -134,21 +180,21 @@ spec:
           - patch
           - update
         - apiGroups:
-          - cert-manager.io
+          - authentication.k8s.io
           resources:
-          - certificates
-          - issuers
+          - tokenreviews
           verbs:
           - create
-          - delete
-          - get
-          - list
-          - patch
-          - update
-          - watch
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
         serviceAccountName: stateful-singleton-controller-manager
       deployments:
       - label:
+          app.kubernetes.io/managed-by: kustomize
           app.kubernetes.io/name: stateful-singleton
           control-plane: controller-manager
         name: stateful-singleton-controller-manager
@@ -169,12 +215,13 @@ spec:
             spec:
               containers:
               - args:
+                - --metrics-bind-address=:8443
                 - --leader-elect
                 - --health-probe-bind-address=:8081
                 - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
                 command:
                 - /manager
-                image: controller:latest
+                image: quay.io/jonantin/statefulsingleton/controller:v0.1.0
                 livenessProbe:
                   httpGet:
                     path: /healthz
@@ -218,6 +265,40 @@ spec:
               - name: webhook-certs
                 secret:
                   secretName: webhook-server-cert
+      permissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        serviceAccountName: stateful-singleton-controller-manager
     strategy: deployment
   installModes:
   - supported: false
@@ -246,7 +327,7 @@ spec:
   webhookdefinitions:
   - admissionReviewVersions:
     - v1
-    containerPort: 9443
+    containerPort: 443
     deploymentName: stateful-singleton-controller-manager
     failurePolicy: Ignore
     generateName: mpod.kb.io
